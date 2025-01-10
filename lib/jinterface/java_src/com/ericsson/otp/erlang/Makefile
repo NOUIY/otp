@@ -2,9 +2,9 @@
 
 #
 # %CopyrightBegin%
-# 
-# Copyright Ericsson AB 2000-2021. All Rights Reserved.
-# 
+#
+# Copyright Ericsson AB 2000-2024. All Rights Reserved.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# 
+#
 # %CopyrightEnd%
 #
 include $(ERL_TOP)/make/target.mk
@@ -82,7 +82,7 @@ ifneq ($(V),0)
 JARFLAGS=-cfv
 endif
 
-JAVA_OPTIONS = -Xlint 
+JAVA_OPTIONS = -Xlint -encoding UTF-8
 
 ifeq ($(TESTROOT),)
 RELEASE_PATH="$(ERL_TOP)/release/$(TARGET)"
@@ -100,12 +100,14 @@ $(APP_TARGET): $(APP_SRC) $(ERL_TOP)/lib/jinterface/vsn.mk
 $(APPUP_TARGET): $(APPUP_SRC) $(ERL_TOP)/lib/jinterface/vsn.mk
 	$(vsn_verbose)sed -e 's;%VSN%;$(JINTERFACE_VSN);' $< > $@
 
-$(TYPES): make_dirs $(JAVA_DEST_ROOT)$(JARFILE)
+_create_dirs := $(shell mkdir -p $(JAVA_DEST_ROOT))
 
-make_dirs:
-	$(V_at)if [ ! -d "$(JAVA_DEST_ROOT)" ];then mkdir "$(JAVA_DEST_ROOT)"; fi
+$(TYPES): $(JAVA_DEST_ROOT)$(JARFILE)
 
-$(JAVA_DEST_ROOT)$(JARFILE): $(TARGET_FILES)
+$(JAVA_DEST_ROOT):
+	-@mkdir -p $(JAVA_DEST_ROOT)
+
+$(JAVA_DEST_ROOT)$(JARFILE): $(JAVA_DEST_ROOT) $(TARGET_FILES)
 	@(cd $(JAVA_DEST_ROOT) ; $(JAR) $(JARFLAGS) $(JARFILE) $(JAVA_CLASS_SUBDIR))
 
 clean:
@@ -132,7 +134,5 @@ release_spec: opt
 	$(V_at)$(INSTALL_DATA) $(APPUP_TARGET) "$(RELSYSDIR)/ebin/$(APPUP_FILE)"
 
 release_docs_spec:
-
-xmllint:
 
 # ----------------------------------------------------

@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2002-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2002-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,6 @@
 #include "erl_mseg.h"
 #include "global.h"
 #include "erl_threads.h"
-#include "erl_mtrace.h"
 #include "erl_time.h"
 #include "erl_alloc.h"
 #include "big.h"
@@ -44,21 +43,6 @@
 #include "erl_util_queue.h"
 
 #if HAVE_ERTS_MSEG
-
-#define SEGTYPE ERTS_MTRACE_SEGMENT_ID
-
-#ifndef HAVE_GETPAGESIZE
-#define HAVE_GETPAGESIZE 0
-#endif
-
-#ifdef _SC_PAGESIZE
-#  define GET_PAGE_SIZE sysconf(_SC_PAGESIZE)
-#elif HAVE_GETPAGESIZE
-#  define GET_PAGE_SIZE getpagesize()
-#else
-#  error "Page size unknown"
-     /* Implement some other way to get the real page size if needed! */
-#endif
 
 #undef MIN
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
@@ -547,8 +531,8 @@ static ERTS_INLINE void *cache_get_segment(ErtsMsegAllctr_t *ma, UWord *size_p, 
 	    best->seg  = ((char *)seg) + size;
 	    best->size = csize - size;
 
-	    ASSERT((size % GET_PAGE_SIZE) == 0);
-	    ASSERT((best->size % GET_PAGE_SIZE) == 0);
+	    ASSERT((size % sys_page_size) == 0);
+	    ASSERT((best->size % sys_page_size) == 0);
 
 	    *size_p = size;
 
@@ -570,9 +554,6 @@ static ERTS_INLINE Uint mseg_drop_one_cache_size(ErtsMsegAllctr_t *ma, Uint flag
     c = erts_circleq_tail(head);
     erts_circleq_remove(c);
 
-    if (erts_mtrace_enabled)
-	erts_mtrace_crr_free(SEGTYPE, SEGTYPE, c->seg);
-
     mseg_destroy(ma, flags, c->seg, c->size);
     mseg_cache_clear_node(c);
     erts_circleq_push_head(&(ma->cache_free), c);
@@ -592,9 +573,6 @@ static ERTS_INLINE Uint mseg_drop_cache_size(ErtsMsegAllctr_t *ma, Uint flags, c
 
 	c = erts_circleq_tail(head);
 	erts_circleq_remove(c);
-
-	if (erts_mtrace_enabled)
-	    erts_mtrace_crr_free(SEGTYPE, SEGTYPE, c->seg);
 
 	mseg_destroy(ma, flags, c->seg, c->size);
 
@@ -732,9 +710,6 @@ mseg_alloc(ErtsMsegAllctr_t *ma, ErtsAlcType_t atype, UWord *size_p,
     else {
 done:
 	*size_p = size;
-	if (erts_mtrace_enabled)
-	    erts_mtrace_crr_alloc(seg, atype, ERTS_MTRACE_SEGMENT_ID, size);
-
 	ERTS_MSEG_ALLOC_STAT(ma,size);
     }
 
@@ -752,9 +727,6 @@ mseg_dealloc(ErtsMsegAllctr_t *ma, ErtsAlcType_t atype, void *seg, UWord size,
 	schedule_cache_check(ma);
 	goto done;
     }
-
-    if (erts_mtrace_enabled)
-	erts_mtrace_crr_free(atype, SEGTYPE, seg);
 
     mseg_destroy(ma, flags, seg, size);
 
@@ -824,9 +796,6 @@ mseg_realloc(ErtsMsegAllctr_t *ma, ErtsAlcType_t atype, void *seg,
 		new_size = old_size;
 	}
     }
-
-    if (erts_mtrace_enabled)
-	erts_mtrace_crr_realloc(new_seg, atype, SEGTYPE, seg, new_size);
 
     INC_CC(ma, realloc);
 
@@ -1413,10 +1382,11 @@ erts_mseg_init(ErtsMsegInit_t *init)
     erts_mmap_init(&erts_literal_mmapper, &init->literal_mmap);
 #endif
 
-    if (!IS_2POW(GET_PAGE_SIZE))
-	erts_exit(ERTS_ABORT_EXIT, "erts_mseg: Unexpected page_size %beu\n", GET_PAGE_SIZE);
+    if (!IS_2POW(sys_page_size))
+	erts_exit(ERTS_ABORT_EXIT, "erts_mseg: Unexpected sys_page_size %beu\n", sys_page_size);
 
-    ASSERT((MSEG_ALIGNED_SIZE % GET_PAGE_SIZE) == 0);
+    ASSERT((MSEG_ALIGNED_SIZE % sys_page_size) == 0
+	   || (sys_page_size % MSEG_ALIGNED_SIZE) == 0);
 
     for (i = 0; i < no_mseg_allocators; i++) {
 	ErtsMsegAllctr_t *ma = ERTS_MSEG_ALLCTR_IX(i);

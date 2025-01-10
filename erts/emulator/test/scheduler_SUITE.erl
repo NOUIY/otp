@@ -1,7 +1,7 @@
 %% 
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2022. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -58,6 +58,7 @@
 	 scheduler_suspend_basic/1,
 	 scheduler_suspend/1,
 	 dirty_scheduler_threads/1,
+         sched_poll/1,
          poll_threads/1,
 	 reader_groups/1,
          otp_16446/1,
@@ -77,6 +78,7 @@ all() ->
      {group, scheduler_bind}, scheduler_threads,
      scheduler_suspend_basic, scheduler_suspend,
      dirty_scheduler_threads,
+     sched_poll,
      poll_threads,
      reader_groups,
      otp_16446,
@@ -105,6 +107,12 @@ init_per_testcase(update_cpu_info, Config) ->
 	_ ->
 	    init_per_tc(update_cpu_info, Config)
     end;
+init_per_testcase(ThreadCase, Config) when ThreadCase =:= poll_threads;
+                                           ThreadCase =:= scheduler_threads ->
+    case erlang:system_info(schedulers_online) of
+        1 -> {skip,"Needs more than one scheduler online"};
+        _ -> init_per_tc(ThreadCase, Config)
+    end;
 init_per_testcase(Case, Config) when is_list(Config) ->
     init_per_tc(Case, Config).
 
@@ -115,7 +123,7 @@ init_per_tc(Case, Config) ->
     [{testcase, Case}, {ok_res, OkRes} |Config].
 
 end_per_testcase(_Case, Config) when is_list(Config) ->
-    ok.
+    erts_test_utils:ept_check_leaked_nodes(Config).
 
 -define(ERTS_RUNQ_CHECK_BALANCE_REDS_PER_SCHED, (2000*2000)).
 -define(DEFAULT_TEST_REDS_PER_SCHED, 200000000).
@@ -1247,7 +1255,7 @@ dirty_schedulers_online_smp_test(SchedOnln) ->
     ok.
 
 get_sstate(Cmd) ->
-    {ok, Peer, Node} = ?CT_PEER(Cmd),
+    {ok, Peer, Node} = ?CT_PEER(#{ args => Cmd, env => [{"ERL_FLAGS",false}]}),
     [SState] = mcall(Node, [fun () ->
                                     erlang:system_info(schedulers_state)
                             end]),
@@ -1255,7 +1263,7 @@ get_sstate(Cmd) ->
     SState.
 
 get_dsstate(Cmd) ->
-    {ok, Peer, Node} = ?CT_PEER(Cmd),
+    {ok, Peer, Node} = ?CT_PEER(#{ args => Cmd, env => [{"ERL_FLAGS",false}]}),
     [DSCPU] = mcall(Node, [fun () ->
 				   erlang:system_info(dirty_cpu_schedulers)
 			   end]),
@@ -1522,6 +1530,55 @@ sst5_loop(N) ->
     erlang:system_flag(multi_scheduling, unblock_normal),
     sst5_loop(N-1).
 
+%% Test scheduler polling: +IOs true|false
+sched_poll(Config) when is_list(Config) ->
+
+    Env = case os:getenv("ERL_AFLAGS") of
+              false ->
+                  [];
+              AFLAGS1 ->
+                  %% Remove any +IOs
+                  AFLAGS2 = list_to_binary(re:replace(AFLAGS1,
+                                                      "\\+IOs (true|false)",
+                                                      "", [global])),
+                  [{"ERL_AFLAGS", binary_to_list(AFLAGS2)}]
+          end,
+
+    [PS | _] = get_iostate(""),
+    HaveSchedPoll = proplists:get_value(concurrent_updates, PS),
+
+    0 = get_sched_pollsets(["+IOs", "false"]),
+    if
+        HaveSchedPoll ->
+            1 = get_sched_pollsets(["+IOs", "true"]),
+            1 = get_sched_pollsets([], Env);
+
+        not HaveSchedPoll ->
+            fail = get_sched_pollsets(["+IOs", "true"]),
+            0 = get_sched_pollsets([], Env)
+    end,
+    fail = get_sched_pollsets(["+IOs", "bad"]),
+    ok.
+
+get_sched_pollsets(Cmd) ->
+    get_sched_pollsets(Cmd, []).
+
+get_sched_pollsets(Cmd, Env)->
+    try
+        {ok, Peer, Node} = ?CT_PEER(#{connection => standard_io, args => Cmd,
+                                      env => [{"ERL_LIBS", false} | Env]}),
+        [IOStates] = mcall(Node,[fun () -> erlang:system_info(check_io) end]),
+        IO = [IOState || IOState <- IOStates,
+            %% We assume non-fallbacks without threads are scheduler pollsets
+            proplists:get_value(fallback, IOState) == false,
+            proplists:get_value(poll_threads, IOState) == 0],
+        peer:stop(Peer),
+        length(IO) % number of scheduler pollsets
+    catch
+        exit:{boot_failed, _} ->
+            fail
+    end.
+
 poll_threads(Config) when is_list(Config) ->
     [PS | _] = get_iostate(""),
     Conc = proplists:get_value(concurrent_updates, PS),
@@ -1578,7 +1635,8 @@ get_ionum(Cmd) ->
 
 get_iostate(Cmd)->
     try
-        {ok, Peer, Node} = ?CT_PEER(#{connection => standard_io, args => Cmd}),
+        {ok, Peer, Node} = ?CT_PEER(#{connection => standard_io, args => Cmd,
+                                      env => [{"ERL_LIBS", false}]}),
         [IOStates] = mcall(Node,[fun () -> erlang:system_info(check_io) end]),
         IO = [IOState || IOState <- IOStates,
             proplists:get_value(fallback, IOState) == false,

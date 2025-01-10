@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,9 +20,12 @@
 
 %%----------------------------------------------------------------------
 %% Purpose: Manages ssl sessions and trusted certifacates
+%% (Note: See the document internal_doc/pem_and_cert_cache.md for additional
+%% information)
 %%----------------------------------------------------------------------
 
 -module(ssl_manager).
+-moduledoc false.
 -behaviour(gen_server).
 
 %% Internal application API
@@ -31,7 +34,7 @@
 	 lookup_trusted_cert/4,
 	 clean_cert_db/2,
          refresh_trusted_db/1, refresh_trusted_db/2,
-	 register_session/2, register_session/4, invalidate_session/2,
+	 register_session/4, invalidate_session/2,
 	 insert_crls/2, insert_crls/3, delete_crls/1, delete_crls/2, 
 	 invalidate_session/3, name/1]).
 
@@ -46,6 +49,13 @@
 -include("ssl_api.hrl").
 
 -include_lib("kernel/include/file.hrl").
+
+-export_type([certdb_ref/0,
+              db_handle/0]).
+
+-type certdb_ref()        :: reference().
+-type db_handle()         :: any().
+-type serialnumber()      :: pos_integer().
 
 -record(state, {
 	  session_cache_client    :: db_handle(),
@@ -119,7 +129,7 @@ connection_init(Trustedcerts, Role, CRLCache) ->
     call({connection_init, Trustedcerts, Role, CRLCache}).
 
 %%--------------------------------------------------------------------
--spec cache_pem_file(binary(), term()) -> {ok, term()} | {error, reason()}.
+-spec cache_pem_file(binary(), term()) -> {ok, term()} | {error, ssl:reason()}.
 %%		    
 %% Description: Cache a pem file and return its content.
 %%--------------------------------------------------------------------
@@ -138,7 +148,7 @@ cache_pem_file(File, DbHandle) ->
     end.
 
 %%--------------------------------------------------------------------
--spec lookup_trusted_cert(term(), reference(), serialnumber(), issuer()) ->
+-spec lookup_trusted_cert(term(), reference(), serialnumber(), public_key:issuer_name()) ->
           undefined |
           {ok, public_key:combined_cert()}.
 %%
@@ -183,9 +193,6 @@ register_session(Host, Port, Session, true) ->
 register_session(Host, Port, Session, unique = Save) ->
     cast({register_session, Host, Port, Session, Save}).
 
--spec register_session(inet:port_number(), #session{}) -> ok.
-register_session(Port, Session) ->
-    cast({register_session, Port, Session}).
 %%--------------------------------------------------------------------
 %%
 %% Description: Make the session unavailable for reuse. After
@@ -263,34 +270,34 @@ init([ManagerName, PemCacheName, Opts]) ->
 	       }}.
 
 %%--------------------------------------------------------------------
--spec handle_call(msg(), from(), #state{}) -> {reply, reply(), #state{}}. 
+-spec handle_call(term(), gen_server:from(), #state{}) -> {reply, Reply::term(), #state{}}.
 %% Possible return values not used now.  
-%%					      {reply, reply(), #state{}, timeout()} |
+%%					      {reply, term(), #state{}, timeout()} |
 %%					      {noreply, #state{}} |
 %%					      {noreply, #state{}, timeout()} |
-%%					      {stop, reason(), reply(), #state{}} |
+%%					      {stop, reason(), term(), #state{}} |
 %%					      {stop, reason(), #state{}}.
 %%
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
 handle_call({{connection_init, <<>>, Role, {CRLCb, UserCRLDb}}, _Pid}, _From,
-	    #state{certificate_db = [CertDb, FileRefDb, PemChace | _] = Db} = State) ->
+	    #state{certificate_db = [CertDb, FileRefDb, PemCache | _] = Db} = State) ->
     Ref = make_ref(), 
     {reply, {ok, #{cert_db_ref => Ref, 
                    cert_db_handle => CertDb, 
                    fileref_db_handle => FileRefDb, 
-                   pem_cache => PemChace, 
+                   pem_cache => PemCache,
                    session_cache => session_cache(Role, State), 
                    crl_db_info => {CRLCb, crl_db_info(Db, UserCRLDb)}}}, State};
 
 handle_call({{connection_init, Trustedcerts, Role, {CRLCb, UserCRLDb}}, Pid}, _From,
-	    #state{certificate_db = [CertDb, FileRefDb, PemChace | _] = Db} = State) ->
+	    #state{certificate_db = [CertDb, FileRefDb, PemCache | _] = Db} = State) ->
     case add_trusted_certs(Pid, Trustedcerts, Db) of
 	{ok, Ref} ->
 	    {reply, {ok, #{cert_db_ref => Ref, 
                            cert_db_handle => CertDb, 
                            fileref_db_handle => FileRefDb, 
-                           pem_cache => PemChace, 
+                           pem_cache => PemCache,
                            session_cache => session_cache(Role, State), 
                            crl_db_info => {CRLCb, crl_db_info(Db, UserCRLDb)}}}, State};
         {error, _} = Error ->
@@ -306,18 +313,20 @@ handle_call({{delete_crls, CRLsOrPath}, _}, _From,
 	    #state{certificate_db = Db} = State) ->
     ssl_pkix_db:remove_crls(Db, CRLsOrPath),
     {reply, ok, State};
-handle_call({{register_session, Host, Port, Session},_}, _, State0) ->
+handle_call({{register_session, Host, Port, Session}, _}, _, State0) ->
     State = client_register_session(Host, Port, Session, State0), 
     {reply, ok, State};
 handle_call({refresh_trusted_db, _}, _, #state{certificate_db = Db} = State) ->
-    ssl_pkix_db:refresh_trusted_certs(Db),
+    PemCache = get(ssl_pem_cache),
+    ssl_pkix_db:refresh_trusted_certs(Db, PemCache),
     {reply, ok, State};
 handle_call({{refresh_trusted_db, File}, _}, _, #state{certificate_db = Db} = State) ->
-    ssl_pkix_db:refresh_trusted_certs(File, Db),
+    PemCache = get(ssl_pem_cache),
+    ssl_pkix_db:refresh_trusted_certs(File, Db, PemCache),
     {reply, ok, State}.
 
 %%--------------------------------------------------------------------
--spec  handle_cast(msg(), #state{}) -> {noreply, #state{}}.
+-spec  handle_cast(term(), #state{}) -> {noreply, #state{}}.
 %% Possible return values not used now.  
 %%				      | {noreply, #state{}, timeout()} |
 %%				       {stop, reason(), #state{}}.
@@ -328,9 +337,6 @@ handle_cast({register_session, Host, Port, Session, unique}, State0) ->
     State = client_register_unique_session(Host, Port, Session, State0), 
     {noreply, State};
 
-handle_cast({register_session, Host, Port, Session, true}, State0) ->
-    State = client_register_session(Host, Port, Session, State0), 
-    {noreply, State};
 handle_cast({invalidate_session, Host, Port,
 	     #session{session_id = ID} = Session},
 	    #state{session_cache_client = Cache,
@@ -347,7 +353,7 @@ handle_cast({delete_crls, CRLsOrPath},
     {noreply, State}.
 
 %%--------------------------------------------------------------------
--spec handle_info(msg(), #state{}) -> {noreply, #state{}}.
+-spec handle_info(term(), #state{}) -> {noreply, #state{}}.
 %% Possible return values not used now.
 %%				      |{noreply, #state{}, timeout()} |
 %%				      {stop, reason(), #state{}}.
@@ -381,7 +387,7 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 %%--------------------------------------------------------------------
--spec terminate(reason(), #state{}) -> ok.
+-spec terminate(ssl:reason(), #state{}) -> ok.
 %%		       
 %% Description: This function is called by a gen_server when it is about to
 %% terminate. It should be the opposite of Module:init/1 and do any necessary
@@ -461,7 +467,7 @@ invalidate_session(Cache, CacheCb, Key, _Session,
 
 clean_cert_db(Ref, CertDb, RefDb, FileMapDb, File) ->
     case ssl_pkix_db:ref_count(Ref, RefDb, 0) of
-	0 ->	  
+	0 ->
 	    ssl_pkix_db:remove(Ref, RefDb),
 	    ssl_pkix_db:remove(File, FileMapDb),
 	    ssl_pkix_db:remove_trusted_certs(Ref, CertDb);
@@ -552,14 +558,12 @@ exists_equivalent(_, []) ->
 exists_equivalent(#session{
 		     peer_certificate = PeerCert,
 		     own_certificates = [OwnCert | _],
-		     compression_method = Compress,
 		     cipher_suite = CipherSuite,
 		     srp_username = SRP,
 		     ecc = ECC} , 
 		  [#session{
 		      peer_certificate = PeerCert,
 		      own_certificates = [OwnCert | _],
-		      compression_method = Compress,
 		      cipher_suite = CipherSuite,
 		      srp_username = SRP,
 		      ecc = ECC} | _]) ->

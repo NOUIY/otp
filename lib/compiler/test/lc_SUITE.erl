@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2001-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2001-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -101,6 +101,16 @@ basic(Config) when is_list(Config) ->
     %% Not matching.
     [] = [3 || {3=4} <- []],
 
+    %% Strict generators (each generator type)
+    [2,3,4] = [X+1 || X <:- [1,2,3]],
+    [2,3,4] = [X+1 || <<X>> <:= <<1,2,3>>],
+    [2,12] = [X*Y || X := Y <:- #{1 => 2, 3 => 4}],
+
+    %% A failing guard following a strict generator is ok
+    [3,4] = [X+1 || X <:- [1,2,3], X > 1],
+    [3,4] = [X+1 || <<X>> <:= <<1,2,3>>, X > 1],
+    [12] = [X*Y || X := Y <:- #{1 => 2, 3 => 4}, X > 1],
+
     %% Error cases.
     [] = [{xx,X} || X <- L0, element(2, X) == no_no_no],
     {'EXIT',_} = (catch [X || X <- L1, list_to_atom(X) == dum]),
@@ -108,6 +118,11 @@ basic(Config) when is_list(Config) ->
     {'EXIT',_} = (catch [X || X <- L1, odd(X)]),
     {'EXIT',{{bad_generator,x},_}} = (catch [E || E <- id(x)]),
     {'EXIT',{{bad_filter,not_bool},_}} = (catch [E || E <- [1,2], id(not_bool)]),
+
+    %% Non-matching elements cause a badmatch error for strict generators
+    {'EXIT',{{badmatch,2},_}} = (catch [X || {ok, X} <:- [{ok,1},2,{ok,3}]]),
+    {'EXIT',{{badmatch,<<128,2>>},_}} = (catch [X || <<0:1, X:7>> <:= <<1,128,2>>]),
+    {'EXIT',{{badmatch,{2,error}},_}} = (catch [X || X := ok <:- #{1 => ok, 2 => error, 3 => ok}]),
 
     %% Make sure that line numbers point out the generator.
     case ?MODULE of
@@ -123,6 +138,11 @@ basic(Config) when is_list(Config) ->
                      [{?MODULE,_,_,
                        [{file,"bad_lc.erl"},{line,7}]}|_]}} =
                 (catch id(bad_generator_bc(a))),
+
+            {'EXIT',{{bad_generator,a},
+                     [{?MODULE,_,_,
+                       [{file,"bad_lc.erl"},{line,10}]}|_]}} =
+                (catch id(bad_generator_mc(a))),
 
             %% List comprehensions with improper lists.
             {'EXIT',{{bad_generator,d},
@@ -168,7 +188,7 @@ no_generator(Config) when is_list(Config) ->
     [a,b,c] = [a || true] ++ [b,c],
     ok.
 
-no_gen(A, B) ->    
+no_gen(A, B) ->
     [{A,B} || A+B =:= 0] ++
 	[{A,B} || A*B =:= 0] ++
 	[{A,B} || A rem B =:= 3] ++
@@ -273,3 +293,6 @@ bad_generator(List) ->                          %Line 2
 bad_generator_bc(List) ->                       %Line 5
     << <<I:4>> ||                               %Line 6
         I <- List>>.                            %Line 7
+bad_generator_mc(List) ->                       %Line 8
+    #{I => ok ||                                %Line 9
+        I <- List}.                             %Line 10

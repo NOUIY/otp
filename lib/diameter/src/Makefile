@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2010-2020. All Rights Reserved.
+# Copyright Ericsson AB 2010-2024. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -110,17 +110,32 @@ ifeq ($(TYPE),debug)
 ERL_COMPILE_FLAGS += -Ddebug
 endif
 
+# The "warn" flag is on by default, so unless we add the
+# the "nowarn" flag, that ("warn") is what we get.
+# The "nowarn" flag overrides the "warn" flag if both
+# are present!
+ifeq ($(NOWARN_MISSING_SPEC_DOCUMENTED),true)
+MISSING_SPEC_DOCUMENTED = +nowarn_missing_spec_documented
+endif
+
 ERL_COMPILE_FLAGS += \
-	+'{parse_transform,sys_pre_attributes}' \
-	+'{attribute,insert,app_vsn,"$(APP_VSN)"}' \
 	+warn_export_vars \
 	+warn_unused_vars \
+	$(MISSING_SPEC_DOCUMENTED) \
+	+'{parse_transform,sys_pre_attributes}' \
+	+'{attribute,insert,app_vsn,"$(APP_VSN)"}' \
 	-pa $(ABS_EBIN) \
 	-I $(INCDIR) \
 	-I gen \
 	$(STRICT_FLAGS)
 # -pa is to be able to include_lib from the include directory: the
 # path must contain the application name.
+
+ifeq ($(ERL_DETERMINISTIC),yes)
+	DETERMINISM_FLAG = +deterministic
+else
+	DETERMINISM_FLAG =
+endif
 
 # ----------------------------------------------------
 # Targets
@@ -152,7 +167,7 @@ $(filter-out opt, $(TYPES)):
 # The dictionary parser.
 gen/$(DICT_YRL).erl: compiler/$(DICT_YRL).yrl
 	$(yecc_verbose) \
-	$(ERLC) -Werror -o $(@D) $<
+	$(ERLC) -Werror $(DETERMINISM_FLAG) -o $(@D) $<
 
 # Generate the app file.
 $(APP_TARGET): $(APP_SRC) ../vsn.mk modules.mk
@@ -205,9 +220,17 @@ info:
 	@echo
 	@$(call list,BINS)
 	@echo ========================================
+	@echo "APP_FILE:          $(APP_FILE)"
+	@echo "APPUP_FILE:        $(APPUP_FILE)"
+	@echo "EXAMPLE_DIRS:      $(EXAMPLE_DIRS)"
+	@echo "NOWARN_MISSING_SPEC_DOCUMENTED: $(NOWARN_MISSING_SPEC_DOCUMENTED)"
+	@echo "MISSING_SPEC_DOCUMENTED: $(MISSING_SPEC_DOCUMENTED)"
+	@echo "ERL_COMPILE_FLAGS: $(ERL_COMPILE_FLAGS)"
+	@echo ========================================
 
 clean:
 	rm -f $(TARGET_FILES) gen/*
+	rm -f $(PLT)
 	rm -f depend.mk
 
 realclean: clean
@@ -239,6 +262,7 @@ dialyze: opt $(PLT)
 	                         $(DICT_MODULES) \
 	                         $(INFO_MODULES)))
 
+
 # ----------------------------------------------------
 # Release targets
 # ----------------------------------------------------
@@ -256,8 +280,8 @@ release_spec: opt
 	$(INSTALL_DATA) $(EXTERNAL_HRLS:%=../include/%) $(DICT_HRLS) \
 	                "$(RELSYSDIR)/include"
 	$(INSTALL_DATA) $(DICTS:%=dict/%.dia) "$(RELSYSDIR)/src/dict"
-	$(MAKE) $(TARGET_DIRS:%/=release_src_%)
-	$(MAKE) $(EXAMPLE_DIRS:%/=release_examples_%)
+	$(MAKE) ERL_DETERMINISTIC=$(ERL_DETERMINISTIC) $(TARGET_DIRS:%/=release_src_%)
+	$(MAKE) ERL_DETERMINISTIC=$(ERL_DETERMINISTIC) $(EXAMPLE_DIRS:%/=release_examples_%)
 
 $(TARGET_DIRS:%/=release_src_%): release_src_%:
 	$(INSTALL_DIR) "$(RELSYSDIR)/src/$*"

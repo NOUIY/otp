@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2020-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2020-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@
  * %CopyrightEnd%
  */
 
+#define ERTS_BEAM_ASM_GLOBAL_WANT_STATIC_DEFS
 #include "beam_asm.hpp"
+#undef ERTS_BEAM_ASM_GLOBAL_WANT_STATIC_DEFS
 
 using namespace asmjit;
 
@@ -27,21 +29,6 @@ extern "C"
 #include "bif.h"
 #include "beam_common.h"
 }
-
-#define STRINGIFY_(X) #X
-#define STRINGIFY(X) STRINGIFY_(X)
-
-#define DECL_EMIT(NAME) {NAME, &BeamGlobalAssembler::emit_##NAME},
-const std::map<BeamGlobalAssembler::GlobalLabels, BeamGlobalAssembler::emitFptr>
-        BeamGlobalAssembler::emitPtrs = {BEAM_GLOBAL_FUNCS(DECL_EMIT)};
-#undef DECL_EMIT
-
-#define DECL_LABEL_NAME(NAME) {NAME, STRINGIFY(NAME)},
-
-const std::map<BeamGlobalAssembler::GlobalLabels, const std::string>
-        BeamGlobalAssembler::labelNames = {BEAM_GLOBAL_FUNCS(
-                DECL_LABEL_NAME) PROCESS_MAIN_LABELS(DECL_LABEL_NAME)};
-#undef DECL_LABEL_NAME
 
 BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
         : BeamAssembler("beam_asm_global") {
@@ -64,11 +51,13 @@ BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
     }
 
     {
-        /* We have no need of the module pointers as we use `getCode(...)` for
-         * everything. */
-        const void *_ignored_exec;
-        void *_ignored_rw;
-        _codegen(allocator, &_ignored_exec, &_ignored_rw);
+        const void *executable_region;
+        void *writable_region;
+
+        BeamAssembler::codegen(allocator, &executable_region, &writable_region);
+        VirtMem::flushInstructionCache((void *)executable_region,
+                                       code.codeSize());
+        VirtMem::protectJitMemory(VirtMem::ProtectJitAccess::kReadExecute);
     }
 
 #ifndef WIN32
@@ -91,10 +80,10 @@ BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
                           .name = code.labelEntry(labels[val.first])->name()});
     }
 
-    beamasm_metadata_update("global",
-                            (ErtsCodePtr)getBaseAddress(),
-                            code.codeSize(),
-                            ranges);
+    (void)beamasm_metadata_insert("global",
+                                  (ErtsCodePtr)getBaseAddress(),
+                                  code.codeSize(),
+                                  ranges);
 #endif
 
     /* `this->get_xxx` are populated last to ensure that we crash if we use them
@@ -108,6 +97,8 @@ BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
 /* ARG3 = (HTOP + S_RESERVED + bytes needed) !!
  * ARG4 = Live registers */
 void BeamGlobalAssembler::emit_garbage_collect() {
+    Label exiting = a.newLabel();
+
     emit_enter_frame();
 
     /* Convert ARG3 to words needed and move it to the correct argument slot.
@@ -134,14 +125,27 @@ void BeamGlobalAssembler::emit_garbage_collect() {
 
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG3);
-    a.mov(ARG5, FCALLS);
-    runtime_call<5>(erts_garbage_collect_nobump);
-    a.sub(FCALLS, RET);
+    a.mov(ARG5d, FCALLS);
+    runtime_call<int (*)(Process *, Uint, Eterm *, int, int),
+                 erts_garbage_collect_nobump>();
+    a.sub(FCALLS, RETd);
 
     emit_leave_runtime<Update::eStack | Update::eHeap>();
-    emit_leave_frame();
 
+#ifdef WIN32
+    a.mov(ARG1d, x86::dword_ptr(c_p, offsetof(Process, state.value)));
+#else
+    a.mov(ARG1d, x86::dword_ptr(c_p, offsetof(Process, state.counter)));
+#endif
+    a.test(ARG1d, imm(ERTS_PSFLG_EXITING));
+    a.short_().jne(exiting);
+
+    emit_leave_frame();
     a.ret();
+
+    a.bind(exiting);
+    emit_unwind_frame();
+    a.jmp(labels[do_schedule]);
 }
 
 /* Handles trapping to exports from C code, setting registers up in the same
@@ -161,8 +165,7 @@ void BeamGlobalAssembler::emit_bif_export_trap() {
  *
  * RET = export entry */
 void BeamGlobalAssembler::emit_export_trampoline() {
-    Label call_bif = a.newLabel(), error_handler = a.newLabel(),
-          jump_trace = a.newLabel();
+    Label call_bif = a.newLabel(), error_handler = a.newLabel();
 
     /* What are we supposed to do? */
     a.mov(ARG1, x86::qword_ptr(RET, offsetof(Export, trampoline.common.op)));
@@ -177,9 +180,6 @@ void BeamGlobalAssembler::emit_export_trampoline() {
 
     a.cmp(ARG1, imm(op_call_error_handler));
     a.je(error_handler);
-
-    a.cmp(ARG1, imm(op_trace_jump_W));
-    a.je(jump_trace);
 
     /* Must never happen. */
     comment("Unexpected export trampoline op");
@@ -202,23 +202,21 @@ void BeamGlobalAssembler::emit_export_trampoline() {
         a.jmp(labels[call_bif_shared]);
     }
 
-    a.bind(jump_trace);
-    a.jmp(x86::qword_ptr(RET, offsetof(Export, trampoline.trace.address)));
-
     a.bind(error_handler);
     {
         emit_enter_frame();
-        emit_enter_runtime<Update::eReductions | Update::eStack |
-                           Update::eHeap>();
+        emit_enter_runtime<Update::eReductions | Update::eHeapAlloc>();
 
         a.mov(ARG1, c_p);
         a.lea(ARG2, x86::qword_ptr(RET, offsetof(Export, info.mfa)));
         load_x_reg_array(ARG3);
         mov_imm(ARG4, am_undefined_function);
-        runtime_call<4>(call_error_handler);
+        runtime_call<
+                const Export
+                        *(*)(Process *, const ErtsCodeMFA *, Eterm *, Eterm),
+                call_error_handler>();
 
-        emit_leave_runtime<Update::eReductions | Update::eStack |
-                           Update::eHeap>();
+        emit_leave_runtime<Update::eReductions | Update::eHeapAlloc>();
 
         a.test(RET, RET);
         a.je(labels[process_exit]);
@@ -233,20 +231,20 @@ void BeamGlobalAssembler::emit_export_trampoline() {
  * the return address as the error address.
  */
 void BeamModuleAssembler::emit_raise_exception() {
-    emit_raise_exception(nullptr);
+    safe_fragment_call(ga->get_raise_exception_null_exp());
+
+    /* `line` instructions need to know the latest offset that may throw an
+     * exception. See the `line` instruction for details. */
+    last_error_offset = a.offset();
 }
 
 void BeamModuleAssembler::emit_raise_exception(const ErtsCodeMFA *exp) {
     mov_imm(ARG4, exp);
     safe_fragment_call(ga->get_raise_exception());
 
-    /*
-     * It is important that error address is not equal to a line
-     * instruction that may follow this BEAM instruction. To avoid
-     * that, BeamModuleAssembler::emit() will emit a nop instruction
-     * if necessary.
-     */
-    last_error_offset = getOffset() & -8;
+    /* `line` instructions need to know the latest offset that may throw an
+     * exception. See the `line` instruction for details. */
+    last_error_offset = a.offset();
 }
 
 void BeamModuleAssembler::emit_raise_exception(Label I,
@@ -277,24 +275,33 @@ void BeamModuleAssembler::emit_raise_exception(x86::Gp I,
     }
 #endif
 
-    abs_jmp(ga->get_raise_exception_shared());
+    a.jmp(resolve_fragment(ga->get_raise_exception_shared()));
 }
 
 void BeamGlobalAssembler::emit_process_exit() {
-    emit_enter_runtime();
+    emit_enter_runtime<Update::eHeapAlloc | Update::eReductions>();
 
     a.mov(ARG1, c_p);
     mov_imm(ARG2, 0);
     mov_imm(ARG4, 0);
     load_x_reg_array(ARG3);
-    runtime_call<4>(handle_error);
+    runtime_call<ErtsCodePtr (*)(Process *,
+                                 ErtsCodePtr,
+                                 Eterm *,
+                                 const ErtsCodeMFA *),
+                 handle_error>();
 
-    emit_leave_runtime();
+    emit_leave_runtime<Update::eHeapAlloc | Update::eReductions>();
 
     a.test(RET, RET);
     a.je(labels[do_schedule]);
     comment("End of process");
     a.ud2();
+}
+
+void BeamGlobalAssembler::emit_raise_exception_null_exp() {
+    mov_imm(ARG4, 0);
+    a.jmp(labels[raise_exception]);
 }
 
 /* Helper function for throwing exceptions from global fragments.
@@ -306,7 +313,7 @@ void BeamGlobalAssembler::emit_raise_exception() {
      * we were called with `safe_fragment_call`. This is safe because we will
      * never actually return to the return address. */
     a.pop(ARG2);
-    a.and_(ARG2, imm(-8));
+    a.and_(ARG2, imm(~_CPMASK));
 
 #ifdef NATIVE_ERLANG_STACK
     a.push(ARG2);
@@ -326,7 +333,7 @@ void BeamGlobalAssembler::emit_raise_exception() {
 void BeamGlobalAssembler::emit_raise_exception_shared() {
     Label crash = a.newLabel();
 
-    emit_enter_runtime<Update::eStack | Update::eHeap>();
+    emit_enter_runtime<Update::eHeapAlloc>();
 
     /* The error address must be a valid CP or NULL. */
     a.test(ARG2d, imm(_CPMASK));
@@ -335,9 +342,13 @@ void BeamGlobalAssembler::emit_raise_exception_shared() {
     /* ARG2 and ARG4 must be set prior to jumping here! */
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG3);
-    runtime_call<4>(handle_error);
+    runtime_call<ErtsCodePtr (*)(Process *,
+                                 ErtsCodePtr,
+                                 Eterm *,
+                                 const ErtsCodeMFA *),
+                 handle_error>();
 
-    emit_leave_runtime<Update::eStack | Update::eHeap>();
+    emit_leave_runtime<Update::eHeapAlloc>();
 
     a.test(RET, RET);
     a.je(labels[do_schedule]);
@@ -356,7 +367,8 @@ void BeamModuleAssembler::emit_proc_lc_unrequire(void) {
     a.mov(ARG1, c_p);
     a.mov(ARG2, imm(ERTS_PROC_LOCK_MAIN));
     a.mov(TMP_MEM1q, RET);
-    runtime_call<2>(erts_proc_lc_unrequire_lock);
+    runtime_call<void (*)(Process *, ErtsProcLocks),
+                 erts_proc_lc_unrequire_lock>();
     a.mov(RET, TMP_MEM1q);
 #endif
 }
@@ -368,7 +380,8 @@ void BeamModuleAssembler::emit_proc_lc_require(void) {
     a.mov(ARG1, c_p);
     a.mov(ARG2, imm(ERTS_PROC_LOCK_MAIN));
     a.mov(TMP_MEM1q, RET);
-    runtime_call<4>(erts_proc_lc_require_lock);
+    runtime_call<void (*)(Process *, ErtsProcLocks, const char *, unsigned int),
+                 erts_proc_lc_require_lock>();
     a.mov(RET, TMP_MEM1q);
 #endif
 }

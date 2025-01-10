@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2020-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2020-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -93,6 +93,12 @@ int beam_load_prepare_emit(LoaderState *stp) {
         init_label(&stp->labels[i]);
     }
 
+    stp->lambda_literals = erts_alloc(ERTS_ALC_T_PREPARED_CODE,
+                               stp->beam.lambdas.count * sizeof(SWord));
+    for (i = 0; i < stp->beam.lambdas.count; i++) {
+        stp->lambda_literals[i] = ERTS_SWORD_MAX;
+    }
+
     stp->import_patches =
         erts_alloc(ERTS_ALC_T_PREPARED_CODE,
                    stp->beam.imports.count * sizeof(BeamInstr));
@@ -105,7 +111,7 @@ int beam_load_prepare_emit(LoaderState *stp) {
 
     for (i = 0; i < stp->beam.imports.count; i++) {
         BeamFile_ImportEntry *import;
-        Export *export;
+        const Export *export;
         int bif_number;
 
         import = &stp->beam.imports.entries[i];
@@ -165,6 +171,10 @@ int beam_load_prepared_dtor(Binary* magic)
             erts_release_literal_area(hdr->literal_area);
             hdr->literal_area = NULL;
         }
+        if (hdr->are_nifs) {
+            erts_free(ERTS_ALC_T_PREPARED_CODE, hdr->are_nifs);
+            hdr->are_nifs = NULL;
+        }
 
         erts_free(ERTS_ALC_T_CODE, hdr);
         stp->code_hdr = NULL;
@@ -178,6 +188,11 @@ int beam_load_prepared_dtor(Binary* magic)
         }
         erts_free(ERTS_ALC_T_PREPARED_CODE, (void *) stp->labels);
         stp->labels = NULL;
+    }
+
+    if (stp->lambda_literals != NULL) {
+        erts_free(ERTS_ALC_T_PREPARED_CODE, (void *)stp->lambda_literals);
+        stp->lambda_literals = NULL;
     }
 
     if (stp->import_patches != NULL) {
@@ -526,7 +541,7 @@ int beam_load_finish_emit(LoaderState *stp) {
     CHKBLK(ERTS_ALC_T_CODE,code_hdr);
 
     /*
-     * Save the updated code code size.
+     * Save the updated code size.
      */
     stp->loaded_size = size;
 
@@ -539,6 +554,7 @@ int beam_load_finish_emit(LoaderState *stp) {
 
 void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_p)
 {
+    ErtsCodeIndex staging_ix;
     unsigned int i;
     int on_load = stp->on_load;
     unsigned catches;
@@ -550,6 +566,13 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
 
     inst_p->code_hdr = stp->code_hdr;
     inst_p->code_length = size;
+    inst_p->writable_region = (void*)inst_p->code_hdr;
+    inst_p->executable_region = inst_p->writable_region;
+
+    staging_ix = erts_staging_code_ix();
+
+    ERTS_LC_ASSERT(erts_initialized == 0 || erts_has_code_load_permission() ||
+                   erts_thr_progress_is_blocking());
 
     /* Update ranges (used for finding a function from a PC value). */
     erts_update_ranges(inst_p->code_hdr, size);
@@ -577,7 +600,7 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
      */
     for (i = 0; i < stp->beam.imports.count; i++) {
         BeamFile_ImportEntry *import;
-        Export *export;
+        const Export *export;
         Uint current;
         Uint next;
 
@@ -601,35 +624,42 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
     if (stp->beam.lambdas.count) {
         BeamFile_LambdaTable *lambda_table;
         ErlFunEntry **fun_entries;
-        LambdaPatch* lp;
-        int i;
+        LambdaPatch *lp;
 
         lambda_table = &stp->beam.lambdas;
+
         fun_entries = erts_alloc(ERTS_ALC_T_LOADER_TMP,
                                  sizeof(ErlFunEntry*) * lambda_table->count);
 
-        for (i = 0; i < lambda_table->count; i++) {
+        for (int i = 0; i < lambda_table->count; i++) {
             BeamFile_LambdaEntry *lambda;
             ErlFunEntry *fun_entry;
 
             lambda = &lambda_table->entries[i];
 
-            fun_entry = erts_put_fun_entry2(stp->module,
-                                            lambda->old_uniq,
-                                            i,
-                                            stp->beam.checksum,
-                                            lambda->index,
-                                            lambda->arity - lambda->num_free);
+            fun_entry = erts_fun_entry_put(stp->module,
+                                           lambda->old_uniq,
+                                           i,
+                                           stp->beam.checksum,
+                                           lambda->index,
+                                           lambda->arity - lambda->num_free);
             fun_entries[i] = fun_entry;
 
-            if (erts_is_fun_loaded(fun_entry)) {
-                /* We've reloaded a module over itself and inherited the old
-                 * instance's fun entries, so we need to undo the reference
-                 * bump in `erts_put_fun_entry2` to make fun purging work. */
-                erts_refc_dectest(&fun_entry->refc, 1);
+            /* If there are no free variables, the loader has created a literal
+             * for this lambda and we need to set its fun entry. */
+            if (lambda->num_free == 0) {
+                ErlFunThing *funp;
+                Eterm fun;
+
+                ASSERT(stp->lambda_literals[i] != ERTS_SWORD_MAX);
+                fun = beamfile_get_literal(&stp->beam, stp->lambda_literals[i]);
+                funp = (ErlFunThing*)boxed_val(fun);
+                ASSERT(funp->entry.fun == NULL);
+                funp->entry.fun = fun_entry;
             }
 
             erts_set_fun_code(fun_entry,
+                              staging_ix,
                               stp->codev + stp->labels[lambda->label].value);
         }
 
@@ -686,7 +716,7 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
              */
             ep->trampoline.not_loaded.deferred = (BeamInstr) address;
         } else {
-            ep->dispatch.addresses[erts_staging_code_ix()] = address;
+            ep->dispatch.addresses[staging_ix] = address;
         }
     }
 
@@ -700,7 +730,7 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
                                          entry->name,
                                          entry->arity);
             const BeamInstr *addr =
-                ep->dispatch.addresses[erts_staging_code_ix()];
+                ep->dispatch.addresses[staging_ix];
 
             if (!ErtsInArea(addr, stp->codev, stp->ci * sizeof(BeamInstr))) {
                 erts_exit(ERTS_ABORT_EXIT,
@@ -1222,10 +1252,10 @@ int beam_load_emit_op(LoaderState *stp, BeamOp *tmp_op) {
             ci++;
             break;
         case TAG_x:
-            code[ci++] = make_loader_x_reg(tmp_op->a[arg].val);
+            code[ci++] = make_loader_x_reg(tmp_op->a[arg].val & REG_MASK);
             break;
         case TAG_y:
-            code[ci++] = make_loader_y_reg(tmp_op->a[arg].val + CP_SIZE);
+            code[ci++] = make_loader_y_reg((tmp_op->a[arg].val & REG_MASK) + CP_SIZE);
             break;
         case TAG_n:
             code[ci++] = NIL;
@@ -1388,7 +1418,6 @@ int beam_load_emit_op(LoaderState *stp, BeamOp *tmp_op) {
         /* Remember offset for the on_load function. */
         stp->on_load = ci;
         break;
-    case op_bs_put_string_WW:
     case op_i_bs_match_string_xfWW:
     case op_i_bs_match_string_yfWW:
         new_string_patch(stp, ci-1);
@@ -1475,4 +1504,8 @@ int beam_load_emit_op(LoaderState *stp, BeamOp *tmp_op) {
 
 load_error:
     return 0;
+}
+
+void beam_load_purge_aux(const BeamCodeHeader *hdr)
+{
 }

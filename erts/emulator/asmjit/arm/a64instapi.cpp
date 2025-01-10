@@ -4,74 +4,33 @@
 // SPDX-License-Identifier: Zlib
 
 #include "../core/api-build_p.h"
-#if !defined(ASMJIT_NO_ARM)
+#if !defined(ASMJIT_NO_AARCH64)
 
 #include "../core/cpuinfo.h"
 #include "../core/misc_p.h"
-#include "../core/support.h"
+#include "../core/support_p.h"
 #include "../arm/a64instapi_p.h"
 #include "../arm/a64instdb_p.h"
 #include "../arm/a64operand.h"
 
 ASMJIT_BEGIN_SUB_NAMESPACE(a64)
 
+namespace InstInternal {
+
 // a64::InstInternal - Text
 // ========================
 
 #ifndef ASMJIT_NO_TEXT
-Error InstInternal::instIdToString(Arch arch, InstId instId, String& output) noexcept {
-  DebugUtils::unused(arch);
-
-  if (ASMJIT_UNLIKELY(!Inst::isDefinedId(instId)))
+Error instIdToString(InstId instId, String& output) noexcept {
+  uint32_t realId = instId & uint32_t(InstIdParts::kRealId);
+  if (ASMJIT_UNLIKELY(!Inst::isDefinedId(realId)))
     return DebugUtils::errored(kErrorInvalidInstruction);
 
-  const InstDB::InstInfo& info = InstDB::infoById(instId);
-  return output.append(InstDB::_nameData + info._nameDataIndex);
+  return InstNameUtils::decode(output, InstDB::_instNameIndexTable[realId], InstDB::_instNameStringTable);
 }
 
-InstId InstInternal::stringToInstId(Arch arch, const char* s, size_t len) noexcept {
-  DebugUtils::unused(arch);
-
-  if (ASMJIT_UNLIKELY(!s))
-    return Inst::kIdNone;
-
-  if (len == SIZE_MAX)
-    len = strlen(s);
-
-  if (ASMJIT_UNLIKELY(len == 0 || len > InstDB::kMaxNameSize))
-    return Inst::kIdNone;
-
-  uint32_t prefix = uint32_t(s[0]) - 'a';
-  if (ASMJIT_UNLIKELY(prefix > 'z' - 'a'))
-    return Inst::kIdNone;
-
-  uint32_t index = InstDB::instNameIndex[prefix].start;
-  if (ASMJIT_UNLIKELY(!index))
-    return Inst::kIdNone;
-
-  const char* nameData = InstDB::_nameData;
-  const InstDB::InstInfo* table = InstDB::_instInfoTable;
-
-  const InstDB::InstInfo* base = table + index;
-  const InstDB::InstInfo* end  = table + InstDB::instNameIndex[prefix].end;
-
-  for (size_t lim = (size_t)(end - base); lim != 0; lim >>= 1) {
-    const InstDB::InstInfo* cur = base + (lim >> 1);
-    int result = Support::cmpInstName(nameData + cur[0]._nameDataIndex, s, len);
-
-    if (result < 0) {
-      base = cur + 1;
-      lim--;
-      continue;
-    }
-
-    if (result > 0)
-      continue;
-
-    return uint32_t((size_t)(cur - table));
-  }
-
-  return Inst::kIdNone;
+InstId stringToInstId(const char* s, size_t len) noexcept {
+  return InstNameUtils::find(s, len, InstDB::instNameIndex, InstDB::_instNameIndexTable, InstDB::_instNameStringTable);
 }
 #endif // !ASMJIT_NO_TEXT
 
@@ -79,9 +38,9 @@ InstId InstInternal::stringToInstId(Arch arch, const char* s, size_t len) noexce
 // ============================
 
 #ifndef ASMJIT_NO_VALIDATION
-ASMJIT_FAVOR_SIZE Error InstInternal::validate(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, ValidationFlags validationFlags) noexcept {
+ASMJIT_FAVOR_SIZE Error validate(const BaseInst& inst, const Operand_* operands, size_t opCount, ValidationFlags validationFlags) noexcept {
   // TODO:
-  DebugUtils::unused(arch, inst, operands, opCount, validationFlags);
+  DebugUtils::unused(inst, operands, opCount, validationFlags);
   return kErrorOk;
 }
 #endif // !ASMJIT_NO_VALIDATION
@@ -125,26 +84,21 @@ static const InstRWInfoData instRWInfoData[] = {
 
 static const uint8_t elementTypeSize[8] = { 0, 1, 2, 4, 8, 4, 4, 0 };
 
-Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, InstRWInfo* out) noexcept {
-  // Unused in Release configuration as the assert is not compiled in.
-  DebugUtils::unused(arch);
-
-  // Only called when `arch` matches X86 family.
-  ASMJIT_ASSERT(Environment::isFamilyARM(arch));
-
+Error queryRWInfo(const BaseInst& inst, const Operand_* operands, size_t opCount, InstRWInfo* out) noexcept {
   // Get the instruction data.
-  InstId instId = inst.id();
-  if (ASMJIT_UNLIKELY(!Inst::isDefinedId(instId)))
+  uint32_t realId = inst.id() & uint32_t(InstIdParts::kRealId);
+
+  if (ASMJIT_UNLIKELY(!Inst::isDefinedId(realId)))
     return DebugUtils::errored(kErrorInvalidInstruction);
 
-  out->_instFlags = 0;
+  out->_instFlags = InstRWFlags::kNone;
   out->_opCount = uint8_t(opCount);
   out->_rmFeature = 0;
   out->_extraReg.reset();
   out->_readFlags = CpuRWFlags::kNone; // TODO: [ARM] Read PSTATUS.
   out->_writeFlags = CpuRWFlags::kNone; // TODO: [ARM] Write PSTATUS
 
-  const InstDB::InstInfo& instInfo = InstDB::_instInfoTable[instId];
+  const InstDB::InstInfo& instInfo = InstDB::_instInfoTable[realId];
   const InstRWInfoData& rwInfo = instRWInfoData[instInfo.rwInfoIndex()];
 
   if (instInfo.hasFlag(InstDB::kInstFlagConsecutive) && opCount > 2) {
@@ -157,7 +111,7 @@ Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_*
         continue;
       }
 
-      OpRWFlags rwFlags = i < opCount -1 ? (OpRWFlags)rwInfo.rwx[0] : (OpRWFlags)rwInfo.rwx[1];
+      OpRWFlags rwFlags = i < opCount - 1 ? (OpRWFlags)rwInfo.rwx[0] : (OpRWFlags)rwInfo.rwx[1];
 
       op._opFlags = rwFlags & ~(OpRWFlags::kZExt);
       op._physId = BaseReg::kIdBad;
@@ -170,6 +124,7 @@ Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_*
       op._readByteMask = rByteMask;
       op._writeByteMask = wByteMask;
       op._extendByteMask = 0;
+      op._consecutiveLeadCount = 0;
 
       if (srcOp.isReg()) {
         if (i == 0)
@@ -214,14 +169,15 @@ Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_*
       op._readByteMask = rByteMask;
       op._writeByteMask = wByteMask;
       op._extendByteMask = 0;
+      op._consecutiveLeadCount = 0;
 
       if (srcOp.isReg()) {
         if (srcOp.as<Vec>().hasElementIndex()) {
           // Only part of the vector is accessed if element index [] is used.
-          uint32_t elementType = srcOp.as<Vec>().elementType();
+          VecElementType elementType = srcOp.as<Vec>().elementType();
           uint32_t elementIndex = srcOp.as<Vec>().elementIndex();
 
-          uint32_t elementSize = elementTypeSize[elementType];
+          uint32_t elementSize = elementTypeSize[size_t(elementType)];
           uint64_t accessMask = uint64_t(Support::lsbMask<uint32_t>(elementSize)) << (elementIndex * elementSize);
 
           op._readByteMask &= accessMask;
@@ -238,8 +194,7 @@ Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_*
         }
 
         if (memOp.hasIndex()) {
-          op.addOpFlags(OpRWFlags::kMemIndexRead);
-          op.addOpFlags(memOp.isPreOrPost() ? OpRWFlags::kMemIndexWrite : OpRWFlags::kNone);
+          op.addOpFlags(memOp.isPreOrPost() ? OpRWFlags::kMemIndexRW : OpRWFlags::kMemIndexRead);
         }
       }
     }
@@ -253,12 +208,14 @@ Error InstInternal::queryRWInfo(Arch arch, const BaseInst& inst, const Operand_*
 // =================================
 
 #ifndef ASMJIT_NO_INTROSPECTION
-Error InstInternal::queryFeatures(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, CpuFeatures* out) noexcept {
+Error queryFeatures(const BaseInst& inst, const Operand_* operands, size_t opCount, CpuFeatures* out) noexcept {
   // TODO: [ARM] QueryFeatures not implemented yet.
-  DebugUtils::unused(arch, inst, operands, opCount, out);
+  DebugUtils::unused(inst, operands, opCount, out);
   return kErrorOk;
 }
 #endif // !ASMJIT_NO_INTROSPECTION
+
+} // {InstInternal}
 
 // a64::InstInternal - Unit
 // ========================
@@ -271,4 +228,4 @@ UNIT(arm_inst_api_text) {
 
 ASMJIT_END_SUB_NAMESPACE
 
-#endif // !ASMJIT_NO_ARM
+#endif // !ASMJIT_NO_AARCH64

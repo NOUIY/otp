@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2018-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2018-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -192,7 +192,7 @@ dbg_connections(Config) ->
                                                           end},
 					     {failfun, fun ssh_test_lib:failfun/2}]),
     
-    ?DBG_RECEIVE("Starting LISTENER on ", Ref, _, Pid),
+    ?DBG_RECEIVE("ssh_acceptor:acceptor_init/4> Starting LISTENER on ", Ref, _, Pid),
 
     C = ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
 					  {user_dir, UserDir},
@@ -336,6 +336,12 @@ dbg_ssh_messages(Config) ->
     ?DBG_RECEIVE("Received SSH_MSG_KEXINIT:",      Ref, C, Pid),
 
     case atom_to_list( (ssh_connection_handler:alg(C))#alg.kex ) of
+        "curve"++_ ->
+            ?DBG_RECEIVE("Going to send SSH_MSG_KEX_ECDH_INIT:",  Ref, C, Pid),
+            ?DBG_RECEIVE("Received SSH_MSG_KEX_ECDH_INIT:",       Ref, D, Pid),
+            ?DBG_RECEIVE("Going to send SSH_MSG_KEX_ECDH_REPLY:", Ref, D, Pid),
+            ?DBG_RECEIVE("Received SSH_MSG_KEX_ECDH_REPLY:",      Ref, C, Pid);
+
         "ecdh-"++_ ->
             ?DBG_RECEIVE("Going to send SSH_MSG_KEX_ECDH_INIT:",  Ref, C, Pid),
             ?DBG_RECEIVE("Received SSH_MSG_KEX_ECDH_INIT:",       Ref, D, Pid),
@@ -429,7 +435,7 @@ dbg_channels(Config) ->
                                              },
 					     {failfun, fun ssh_test_lib:failfun/2}]),
     
-    ?DBG_RECEIVE("Starting LISTENER on ", Ref, _, Pid),
+    ?DBG_RECEIVE("ssh_acceptor:acceptor_init/4> Starting LISTENER on ", Ref, _, Pid),
 
     C = ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
                                           {user_dir, UserDir},

@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1996-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2022. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -111,8 +111,8 @@ typedef enum {
 void init_db(ErtsDbSpinCount);
 int erts_db_process_exiting(Process *, ErtsProcLocks, void **);
 int erts_db_execute_free_fixation(Process*, DbFixation*);
-void db_info(fmtfn_t, void *, int);
-void erts_db_foreach_table(void (*)(DbTable *, void *), void *, int);
+void db_info(fmtfn_t, void *, bool);
+void erts_db_foreach_table(void (*)(DbTable *, void *), void *, bool);
 void erts_db_foreach_offheap(DbTable *,
 			     void (*func)(ErlOffHeap *, void *),
 			     void *);
@@ -121,8 +121,8 @@ void erts_db_foreach_thr_prgr_offheap(void (*func)(ErlOffHeap *, void *),
 
 extern int erts_ets_rwmtx_spin_count;
 extern int user_requested_db_max_tabs; /* set in erl_init */
-extern int erts_ets_realloc_always_moves;  /* set in erl_init */
-extern int erts_ets_always_compress;  /* set in erl_init */
+extern bool erts_ets_realloc_always_moves;  /* set in erl_init */
+extern bool erts_ets_always_compress;  /* set in erl_init */
 extern Export ets_select_delete_continue_exp;
 extern Export ets_select_count_continue_exp;
 extern Export ets_select_replace_continue_exp;
@@ -173,12 +173,15 @@ do {                                                                    \
 
 ERTS_GLB_INLINE void *erts_db_alloc(ErtsAlcType_t type,
 				    DbTable *tab,
-				    Uint size);
+				    Uint size) ERTS_ATTR_MALLOC_US(3);
 ERTS_GLB_INLINE void *erts_db_alloc_fnf(ErtsAlcType_t type,
 					DbTable *tab,
-					Uint size);
-ERTS_GLB_INLINE void *erts_db_alloc_nt(ErtsAlcType_t type, Uint size);
-ERTS_GLB_INLINE void *erts_db_alloc_fnf_nt(ErtsAlcType_t type, Uint size);
+					Uint size) ERTS_ATTR_MALLOC_US(3);
+ERTS_GLB_INLINE void*
+erts_db_alloc_nt(ErtsAlcType_t type, Uint size) ERTS_ATTR_MALLOC_US(2);
+
+ERTS_GLB_INLINE void*
+erts_db_alloc_fnf_nt(ErtsAlcType_t type, Uint size) ERTS_ATTR_MALLOC_US(2);
 
 #if ERTS_GLB_INLINE_INCL_FUNC_DEF
 

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2022. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@
 	 create_long_names/1, bad_tar/1, errors/1, extract_from_binary/1,
 	 extract_from_binary_compressed/1, extract_filtered/1,
 	 extract_from_open_file/1, symlinks/1, open_add_close/1, cooked_compressed/1,
-	 memory/1,unicode/1,read_other_implementations/1,
+	 memory/1,unicode/1,read_other_implementations/1,bsdtgz/1,
          sparse/1, init/1, leading_slash/1, dotdot/1,
          roundtrip_metadata/1, apply_file_info_opts/1,
          incompatible_options/1]).
@@ -42,7 +42,7 @@ all() ->
      extract_from_binary_compressed, extract_from_open_file,
      extract_filtered,
      symlinks, open_add_close, cooked_compressed, memory, unicode,
-     read_other_implementations,
+     read_other_implementations, bsdtgz,
      sparse,init,leading_slash,dotdot,roundtrip_metadata,
      apply_file_info_opts,incompatible_options].
 
@@ -50,7 +50,7 @@ groups() ->
     [].
 
 init_per_suite(Config) ->
-    Config.
+    uid_config(Config).
 
 end_per_suite(_Config) ->
     ok.
@@ -83,7 +83,7 @@ borderline(Config) when is_list(Config) ->
     Record = 512,
     Block = 20 * Record,
 
-    lists:foreach(fun(Size) -> borderline_test(Size, TempDir) end,
+    lists:foreach(fun(Size) -> borderline_test(Size, TempDir, Config) end,
 		  [0, 1, 10, 13, 127, 333, Record-1, Record, Record+1,
 		   Block-2*Record-1, Block-2*Record, Block-2*Record+1,
 		   Block-Record-1, Block-Record, Block-Record+1,
@@ -95,13 +95,16 @@ borderline(Config) when is_list(Config) ->
 
     verify_ports(Config).
 
-borderline_test(Size, TempDir) ->
+borderline_test(Size, TempDir, Config) ->
     io:format("Testing size ~p", [Size]),
-    borderline_test(Size, TempDir, true),
-    borderline_test(Size, TempDir, false),
+    case long_uid(Config) of
+        true -> ok;
+        false -> borderline_test1(Size, TempDir, true)
+    end,
+    borderline_test1(Size, TempDir, false),
     ok.
 
-borderline_test(Size, TempDir, IsUstar) ->
+borderline_test1(Size, TempDir, IsUstar) ->
     Prefix = case IsUstar of
                  true ->
                      "file_";
@@ -113,8 +116,8 @@ borderline_test(Size, TempDir, IsUstar) ->
     Name = filename:join(TempDir, Prefix++SizeList),
 
     %% Create a file and archive it.
-    X0 = erlang:monotonic_time(),
-    ok = file:write_file(Name, random_byte_list(X0, Size)),
+    RandomBytes = rand:bytes(Size),
+    ok = file:write_file(Name, RandomBytes),
     ok = erl_tar:create(Archive, [Name]),
     ok = file:delete(Name),
 
@@ -125,7 +128,7 @@ borderline_test(Size, TempDir, IsUstar) ->
 
     %% Verify contents of extracted file.
     {ok, Bin} = file:read_file(Name),
-    true = match_byte_list(X0, binary_to_list(Bin)),
+    RandomBytes = Bin,
 
     %% Verify that Unix tar can read it.
     case IsUstar of
@@ -198,34 +201,6 @@ make_cmd(Cmd) ->
 	{win32, _} -> lists:concat(["cmd /c",  Cmd]);
 	{unix, _}  -> lists:concat(["sh -c '",  Cmd,  "'"])
     end.
-
-%% Verifies a random byte list.
-
-match_byte_list(X0, [Byte|Rest]) ->
-    X = next_random(X0),
-    case (X bsr 26) band 16#ff of
-	Byte -> match_byte_list(X, Rest);
-	_ -> false
-    end;
-match_byte_list(_, []) ->
-    true.
-
-%% Generates a random byte list.
-
-random_byte_list(X0, Count) ->
-    random_byte_list(X0, Count, []).
-
-random_byte_list(X0, Count, Result) when Count > 0->
-    X = next_random(X0),
-    random_byte_list(X, Count-1, [(X bsr 26) band 16#ff|Result]);
-random_byte_list(_X, 0, Result) ->
-    lists:reverse(Result).
-
-%% This RNG is from line 21 on page 102 in Knuth: The Art of Computer Programming,
-%% Volume II, Seminumerical Algorithms.
-
-next_random(X) ->
-    (X*17059465+1) band 16#fffffffff.
 
 %% Test the 'atomic' operations: create/extract/table, on compressed
 %% and uncompressed archives.
@@ -369,7 +344,6 @@ create_long_names() ->
     ok = erl_tar:tt(TarName),
 
     %% Extract and verify.
-    true = is_ustar(TarName),
     ExtractDir = "extract_dir",
     ok = file:make_dir(ExtractDir),
     ok = erl_tar:extract(TarName, [{cwd,ExtractDir}]),
@@ -616,7 +590,7 @@ symlinks(Config) when is_list(Config) ->
 	      {error, enotsup} ->
 		  {skip, "Symbolic links not supported on this platform"};
 	      ok ->
-		  symlinks(Dir, "bad_symlink", PointsTo),
+		  symlinks(Dir, "bad_symlink", PointsTo, Config),
 		  long_symlink(Dir),
                   symlink_vulnerability(VulnerableDir)
 	  end,
@@ -649,7 +623,7 @@ make_symlink(Path, Link) ->
 	    file:make_symlink(Path, Link)
     end.
 
-symlinks(Dir, BadSymlink, PointsTo) ->
+symlinks(Dir, BadSymlink, PointsTo, Config) ->
     Tar = filename:join(Dir, "symlink.tar"),
     DerefTar = filename:join(Dir, "dereference.tar"),
 
@@ -662,7 +636,6 @@ symlinks(Dir, BadSymlink, PointsTo) ->
     ok = file:write_file(AFile, ALine),
     ok = file:make_symlink(AFile, GoodSymlink),
     ok = erl_tar:create(Tar, [BadSymlink, GoodSymlink, AFile], [verbose]),
-    true = is_ustar(Tar),
 
     %% List contents of tar file.
 
@@ -671,7 +644,12 @@ symlinks(Dir, BadSymlink, PointsTo) ->
     %% Also create another archive with the dereference flag.
 
     ok = erl_tar:create(DerefTar, [AFile, GoodSymlink], [dereference, verbose]),
-    true = is_ustar(DerefTar),
+    case long_uid(Config) of
+        true -> ok;
+        false ->
+            true = is_ustar(Tar),
+            true = is_ustar(DerefTar)
+    end,
 
     %% Extract files to a new directory.
 
@@ -802,7 +780,11 @@ open_add_close(Config) when is_list(Config) ->
     ok = erl_tar:add(AD, ADir, [verbose]),
     ok = erl_tar:add(AD, AnotherDir, [verbose]),
     ok = erl_tar:close(AD),
-    true = is_ustar(TarOne),
+    case long_uid(Config) of
+        true -> ok;
+        false ->
+            true = is_ustar(TarOne)
+    end,
 
     ok = erl_tar:t(TarOne),
     ok = erl_tar:tt(TarOne),
@@ -891,6 +873,17 @@ do_read_other_implementations([File|Rest], DataDir) ->
     {ok, _} = erl_tar:extract(Full, [memory]),
     do_read_other_implementations(Rest, DataDir).
 
+%% test block padding with compressed tar from bsdtar or tape
+bsdtgz(Config) when is_list(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    File = "example_pad.tgz",
+    Full = filename:join(DataDir, File),
+    io:format("~nTrying ~s", [File]),
+    Table = ["autofs.conf","rpc"],
+    {ok, Table} = erl_tar:table(Full, [compressed]),
+    {ok, Bin} = file:read_file(Full),
+    {ok, Table} = erl_tar:table({binary, Bin}, [compressed]),
+    verify_ports(Config).
 
 %% Test handling of sparse files
 sparse(Config) when is_list(Config) ->
@@ -1154,3 +1147,14 @@ verify_ports(Config) ->
         [_|_]=Rem ->
             error({leaked_ports,Rem})
     end.
+
+uid_config(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    Long = filename:join(DataDir, "long_names.tar"),
+    {ok, FileInfo} = file:read_file_info(Long),
+    Uid = FileInfo#file_info.uid,
+    Octal = integer_to_list(Uid, 8),
+    [{longuid, length(Octal) > 7}|Config].
+
+long_uid(Config) ->
+    proplists:get_value(longuid, Config).

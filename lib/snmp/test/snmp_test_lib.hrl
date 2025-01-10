@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2002-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -61,6 +61,7 @@
 -define(HAS_SUPPORT_IPV6(),  ?LIB:has_support_ipv6()).
 
 -define(PCALL(F, T, D),      ?LIB:proxy_call(F, T, D)).
+-define(PCALL(F, T, PT, D),  ?LIB:proxy_call(F, T, PT, D)).
 
 
 %% - Time macros -
@@ -103,9 +104,6 @@
 -define(PING(N),            ?LIB:ping(N)).
 -define(LNODES(),           ?LIB:local_nodes()).
 -define(NODES(H),           ?LIB:nodes_on(H)).
--define(START_NODE(N,A),    ?LIB:start_node(N,A)).
--define(STOP_NODE(N),       ?LIB:stop_node(N)).
-
 
 %% - Application and Crypto utility macros - 
 
@@ -131,7 +129,8 @@
 -define(P(C),               ?LIB:p(?MODULE, C)).
 
 %% Takes a format call (such as io:format) and produces a printable string
--define(F(F, A),            ?LIB:f(F, A)).
+-define(F(_FS_, _AS_),      ?LIB:f((_FS_), (_AS_))).
+-define(F(_FS_),            ?F((_FS_), [])).
 
 -ifdef(snmp_debug).
 -define(DBG(F,A),      ?IPRINT(F, A)).
@@ -158,3 +157,9 @@
 -define(FTS(),         snmp_misc:formated_timestamp()).
 -define(FTS(TS),       snmp_misc:format_timestamp(TS)).
 
+%% This needs to be a macro-definition to capture ?FUNCTION_NAME and ?MODULE.
+-define (START_PEER(Kind), ?CT_PEER(#{
+    name => ?CT_PEER_NAME(atom_to_list(?FUNCTION_NAME) ++ Kind),
+    args => ["-s", "snmp_test_sys_monitor", "start", "-s", "global", "sync"]
+})).
+-define(STOP_PEER(__P__), peer:stop(__P__)).

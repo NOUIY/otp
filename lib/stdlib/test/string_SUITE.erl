@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2019. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2023. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,7 +36,9 @@
          uppercase/1, lowercase/1, titlecase/1, casefold/1,
          to_integer/1,to_float/1,
          prefix/1, split/1, replace/1, find/1,
-         lexemes/1, nth_lexeme/1, cd_gc/1, meas/1
+         lexemes/1, nth_lexeme/1, cd_gc/1,
+         jaro_similarity/1,
+         meas/1
         ]).
 
 -export([len/1,old_equal/1,old_concat/1,chr_rchr/1,str_rstr/1]).
@@ -66,6 +68,7 @@ groups() ->
        to_integer, to_float,
        uppercase, lowercase, titlecase, casefold,
        prefix, find, split, replace, cd_gc,
+       jaro_similarity,
        meas]},
      {list_string,
       [len, old_equal, old_concat, chr_rchr, str_rstr, span_cspan,
@@ -643,21 +646,33 @@ cd_gc(_) ->
     [] = string:next_codepoint(""),
     [] = string:next_codepoint(<<>>),
     [] = string:next_codepoint([<<>>]),
+    [$a|""] = string:next_codepoint("a"),
+    [$a|<<>>] = string:next_codepoint(<<"a">>),
+    [$a|[<<>>,$b]] = string:next_codepoint([<<"a">>,$b]),
     "abcd" = string:next_codepoint("abcd"),
-    [$e,778] = string:next_codepoint([$e,778]),
+    [$e|[778]] = string:next_codepoint([$e,778]),
     [$e|<<204,138>>] = string:next_codepoint(<<$e,778/utf8>>),
-    [778|_] = string:next_codepoint(tl(string:next_codepoint(<<$e,778/utf8>>))),
+    [778|<<>>] = string:next_codepoint(tl(string:next_codepoint(<<$e,778/utf8>>))),
     [0|<<128,1>>] = string:next_codepoint(<<0,128,1>>),
     {error,<<128,1>>} = string:next_codepoint(<<128,1>>),
+    [128021|<<>>] = string:next_codepoint(<<128021/utf8>>), %% Dog
+    [128021|<<8205/utf8>>] = string:next_codepoint(<<128021/utf8,8205/utf8>>), %% Dog + ZWJ
+    [128021|<<8205/utf8,129466/utf8>>] = string:next_codepoint(<<128021/utf8,8205/utf8,129466/utf8>>), %% Dog + ZWJ + Service vest == Service dog
 
     [] = string:next_grapheme(""),
     [] = string:next_grapheme(<<>>),
     [] = string:next_grapheme([<<>>]),
+    [$a|""] = string:next_grapheme("a"),
+    [$a|<<>>] = string:next_grapheme(<<"a">>),
+    [$a|[<<>>,$b]] = string:next_grapheme([<<"a">>,$b]),
     "abcd" = string:next_grapheme("abcd"),
-    [[$e,778]] = string:next_grapheme([$e,778]),
-    [[$e,778]] = string:next_grapheme(<<$e,778/utf8>>),
+    [[$e,778]|""] = string:next_grapheme([$e,778]),
+    [[$e,778]|<<>>] = string:next_grapheme(<<$e,778/utf8>>),
     [0|<<128,1>>] = string:next_grapheme(<<0,128,1>>),
     {error,<<128,1>>} = string:next_grapheme(<<128,1>>),
+    [128021|<<>>] = string:next_grapheme(<<128021/utf8>>), %% Dog
+    [[128021,8205]|<<>>] = string:next_grapheme(<<128021/utf8,8205/utf8>>), %% Dog + ZWJ
+    [[128021,8205,129466]|<<>>] = string:next_grapheme(<<128021/utf8,8205/utf8,129466/utf8>>), %% Dog + ZWJ + Service vest == Service dog
 
     ok.
 
@@ -774,6 +789,36 @@ nth_lexeme(_) ->
     ?TEST([<<"aae">>,778,"äöoo"], [2,[[$e,778]]], "äöoo"),
     ?TEST([<<"aae">>,778,"äöo21"], [2,[[$e,778],$o]], "äö"),
     ?TEST([<<"aae">>,778,"öeeåäö"], [2,"e"], "åäö"),
+    ok.
+
+jaro_similarity(_Config) ->
+    ?TEST("", [""], 1.0),
+    ?TEST("", [["", <<"">>]], 1.0),
+    %% From https://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance#Jaro_similarity
+    ?TEST("faremviel", ["farmville"], 0.8842592592592592),
+    ?TEST("michelle", ["michael"], 0.8690476190476191),
+    ?TEST("michelle", [<<"michael">>], 0.8690476190476191),
+    ?TEST(<<"Édouard"/utf8>>, ["Claude"], 0.5317460317460317),
+
+
+    ?TEST("farmville", ["farmville"], 1.0),
+    ?TEST("farmville", ["zxzxzx"], +0.0),
+
+    ?TEST("Saturday", ["Sunday"], 0.71944444),
+    ?TEST("Sunday", ["Saturday"], 0.71944444),
+
+    %% Short strings (no translations counted)
+    ?TEST("ca", ["abc"], 0.0),
+    ?TEST("ca", ["cb"],  ((1/2+1/2+1)/3)),
+    ?TEST("ca", ["cab"], ((2/2+2/3+1)/3)),
+    ?TEST("caa", ["cab"], ((2/3+2/3+1)/3)),
+    %% With one translation
+    ?TEST("caabx", ["caba"], ((4/5+4/4+((4-2/2)/4))/3)),
+
+    InvalidUTF8 = <<192,192>>,
+    {'EXIT', {badarg, _}} = ?TRY(string:jaro_similarity("foo", InvalidUTF8)),
+    {'EXIT', {badarg, _}} = ?TRY(string:jaro_similarity("foo", <<$a, InvalidUTF8/binary, $z>>)),
+
     ok.
 
 
@@ -944,7 +989,7 @@ test_1(Line, Func, Str, Args, Exp) ->
         check_types(Line, Func, Args, Res),
         case res(Res, Exp) of
             true -> ok;
-            {Res1,Exp1} when is_tuple(Exp1) ->
+            {Res1,Exp1} when is_tuple(Exp1); is_float(Exp1) ->
                 io:format("~p~n",[Args]),
                 io:format("~p:~p: ~ts~w =>~n  :~w:~w~n",
                           [Func,Line, Str,Str,Res1,Exp1]),
@@ -987,6 +1032,8 @@ res({S1,S2}=S, {Exp1,Exp2}=E) -> %% For take
         {true, true} -> true;
         _ -> {S, E}
     end;
+res(Float, Exp) when is_float(Exp) ->
+    abs(Float - Exp) < 0.0000001 orelse {Float, Exp};
 res(Int, Exp) ->
     Int == Exp orelse {Int, Exp}.
 
@@ -995,8 +1042,10 @@ check_types(_Line, _Func, _Str, Res)
   when is_integer(Res); is_boolean(Res); Res =:= nomatch ->
     %% length or equal
     ok;
-check_types(Line, Func, [S1,S2], Res)
-  when Func =:= concat ->
+check_types(_Line, jaro_similarity, _Str, Res)
+  when is_float(Res) ->
+    ok;
+check_types(Line, concat = Func, [S1,S2], Res) ->
     case check_types_1(type(S1),type(S2)) of
         ok ->
             case check_types_1(type(S1),type(Res)) of
@@ -1439,8 +1488,11 @@ centre(Config) when is_list(Config) ->
     ok.
 
 old_to_integer(Config) when is_list(Config) ->
+    {0,""} = test_to_integer("0"),
+    {0,""} = test_to_integer(lists:duplicate(200, $0)),
     {1,""} = test_to_integer("1"),
     {1,""} = test_to_integer("+1"),
+    {1,""} = test_to_integer("0001"),
     {-1,""} = test_to_integer("-1"),
     {1,"="} = test_to_integer("1="),
     {7,"F"} = test_to_integer("7F"),
@@ -1448,6 +1500,16 @@ old_to_integer(Config) when is_list(Config) ->
     {709,"*2"} = test_to_integer("709*2"),
     {0,"xAB"} = test_to_integer("0xAB"),
     {16,"#FF"} = test_to_integer("16#FF"),
+
+    %% Test a bignum.
+    Big = 12385792987438978973984398348974398593,
+    NegBig = -Big,
+    BigString = integer_to_list(Big),
+    {Big,"tail"} = string:to_integer(BigString ++ "tail"),
+    {Big,"tail"} = string:to_integer("+" ++ BigString ++ "tail"),
+    {NegBig,"tail"} = string:to_integer("-" ++ BigString ++ "tail"),
+
+    %% Test errors.
     {error,no_integer} = test_to_integer(""),
     {error,no_integer} = test_to_integer("!1"),
     {error,no_integer} = test_to_integer("F1"),
@@ -1455,6 +1517,12 @@ old_to_integer(Config) when is_list(Config) ->
     %% {3,[[]]} = test_to_integer([$3,[]]),
     %% {3,[hello]} = test_to_integer([$3,hello]),
     {error,badarg} = test_to_integer([$3,hello]),
+
+    %% Test the internal string:list_to_integer/1 BIF directly.
+    {error,not_a_list} = string:list_to_integer(abc),
+    {error,no_integer} = string:list_to_integer(""),
+    {error,no_integer} = string:list_to_integer("+"),
+
     ok.
 
 test_to_integer(Str) ->
