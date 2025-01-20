@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2001-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2001-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -41,7 +41,8 @@
 	 check_qlc_hrl/1,andalso_semi/1,t_tuple_size/1,binary_part/1,
 	 bad_constants/1,bad_guards/1,
          guard_in_catch/1,beam_bool_SUITE/1,
-         repeated_type_tests/1,use_after_branch/1]).
+         repeated_type_tests/1,use_after_branch/1,
+         body_in_guard/1]).
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
 
@@ -60,7 +61,7 @@ groups() ->
        basic_andalso_orelse,traverse_dcd,
        check_qlc_hrl,andalso_semi,t_tuple_size,binary_part,
        bad_constants,bad_guards,guard_in_catch,beam_bool_SUITE,
-       repeated_type_tests,use_after_branch]},
+       repeated_type_tests,use_after_branch,body_in_guard]},
      {slow,[],[literal_type_tests,generated_combinations]}].
 
 init_per_suite(Config) ->
@@ -129,6 +130,8 @@ misc(Config) when is_list(Config) ->
     error = if abs(Zero > One) -> ok; true -> error end,
     ok = if is_integer(Zero) >= is_integer(One) -> ok end,
 
+    {'EXIT',{function_clause,_}} = catch misc_4(),
+
     ok.
 
 misc_1([{W},{X},{Y},{Z}]) ->
@@ -149,6 +152,9 @@ misc_3(LenUp, LenDw) ->
 	LenUp >= 1 orelse ((LenDw >= 2) xor true) -> true;
 	true -> false
     end.
+
+misc_4() when <<(is_atom((#{} #{ ok := ok })) orelse <<>>)/bytes>> >= ok ->
+    ok.
 
 get_data({o,Active,Raw}, BytesToRead, Buffer) 
   when Raw =:= raw; Raw =:= 0 ->
@@ -1156,11 +1162,19 @@ do_complex_guard_2(X, Y, Z) ->
 gbif(Config) when is_list(Config) ->
     error = gbif_1(1, {false,true}),
     ok = gbif_1(2, {false,true}),
+
+    error = gbif_2(id(0)),
+    error = gbif_2(id(<<>>)),
+
     ok.
 
 gbif_1(P, T) when element(P, T) -> ok;
 gbif_1(_, _) -> error.
 
+gbif_2(A) when bnot trunc((<<(true orelse ok)>> =/= A orelse 0) + 1) =:= A ->
+    ok;
+gbif_2(_) ->
+    error.
 
 t_is_boolean(Config) when is_list(Config) ->
     true = is_boolean(true),
@@ -1258,8 +1272,30 @@ is_function_2(Config) when is_list(Config) ->
 
     F = fun(_) -> ok end,
     if
-	is_function(F, 1) -> ok
-    end.
+        is_function(F, 1) -> ok
+    end,
+
+    variable_is_function_2(),
+
+    ok.
+
+variable_is_function_2() ->
+    F = fun() -> ok end,
+    [F] = vif_1([id(F)], id(0), []),
+    [F] = vif_2([id(F)], id(0) band 15, []),
+    ok.
+
+%% Completely unknown arity
+vif_1([F | Fs], Arity, Acc) when is_function(F, Arity) ->
+    vif_1(Fs, Arity, [F | Acc]);
+vif_1([], _Arity, Acc) ->
+    Acc.
+
+%% Arity known to be between 0 and 15
+vif_2([F | Fs], Arity, Acc) when is_function(F, Arity) ->
+    vif_2(Fs, Arity, [F | Acc]);
+vif_2([], _Arity, Acc) ->
+    Acc.
 
 tricky(Config) when is_list(Config) ->
     not_ok = tricky_1(1, 2),
@@ -1338,6 +1374,23 @@ rb(_, _, _) -> false.
 
 
 rel_ops(Config) when is_list(Config) ->
+    TupleUnion = case id(2) of
+                     2 -> {a,id(b)};
+                     3 -> {b,id(b),c}
+                 end,
+    Float = float(id(42)),
+    Int = trunc(id(42.0)),
+
+    IntFunFloat = make_fun(Float),
+    IntFunInt = make_fun(Int),
+
+    FloatFun = make_fun(Float, Float),
+    IntFun = make_fun(Int, Int),
+    MixedFun = make_fun(42, 42.0),
+
+    MixedFun14 = make_fun(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13.0, 14.0),
+    IntFun14 = make_fun(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+
     ?T(=/=, 1, 1.0),
     ?F(=/=, 2, 2),
     ?F(=/=, {a}, {a}),
@@ -1346,9 +1399,50 @@ rel_ops(Config) when is_list(Config) ->
     ?F(/=, 0, 0.0),
     ?T(/=, 0, 1),
     ?F(/=, {a}, {a}),
+    ?F(/=, {a,b}, TupleUnion),
+    ?T(/=, {x,y}, TupleUnion),
+    ?T(/=, TupleUnion, {x,y}),
+    ?F(/=, #{key => Int}, #{key => Float}),
 
+    ?F(/=, #{key => Int}, #{key => Float}),
+    ?F(/=, #{40 => Int}, #{40 => Int}),
+    ?F(/=, #{42 => Float}, #{42 => Int}),
+    ?T(/=, #{100.0 => Float}, #{100 => Float}),
+
+    ?F(/=, FloatFun, FloatFun),
+    ?T(/=, FloatFun, MixedFun14),
+
+    ?T(==, Int, 42.0),
+    ?T(==, Float, 42),
     ?T(==, 1, 1.0),
+    ?T(==, 1.0, 1),
+    ?F(==, Float, a),
+    ?T(==, Float, Float),
     ?F(==, a, {}),
+    ?T(==, TupleUnion, {a,b}),
+    ?F(==, {x,y}, TupleUnion),
+    ?F(==, {a,Float}, TupleUnion),
+
+    ?T(==, #{key => Float}, #{key => Int}),
+    ?T(==, #{40 => Int}, #{40 => Int}),
+    ?T(==, #{42 => Int}, #{42 => Float}),
+    ?F(==, #{100 => Float}, #{100.0 => Float}),
+
+    case ?MODULE of
+        guard_inline_SUITE ->
+            %% Inlining will inline the fun environment into the fun bodies,
+            %% creating funs having no enviroment and different bodies.
+            ok;
+        _ ->
+            ?T(==, IntFunInt, IntFunFloat),
+            ?T(==, FloatFun, FloatFun),
+            ?T(==, FloatFun, IntFun),
+            ?T(==, MixedFun, IntFun),
+            ?T(==, MixedFun, FloatFun),
+            ?T(==, IntFun14, MixedFun14),
+            ?T(==, MixedFun14, IntFun14),
+            ?F(==, IntFun14, IntFun)
+    end,
 
     ?F(=:=, 1, 1.0),
     ?T(=:=, 42.0, 42.0),
@@ -1405,6 +1499,17 @@ rel_ops(Config) when is_list(Config) ->
 
     ok.
 
+make_fun(N) ->
+    fun() -> round(N + 0.5) end.
+
+make_fun(A, B) ->
+    fun() -> {A,B} end.
+
+make_fun(A, B, C, D, E, F, G, H, I, J, K, L, M, N) ->
+    fun() ->
+            {A, B, C, D, E, F, G, H, I, J, K, L, M, N}
+    end.
+
 -undef(TestOp).
 
 rel_op_combinations(Config) when is_list(Config) ->
@@ -1413,16 +1518,24 @@ rel_op_combinations(Config) when is_list(Config) ->
 	lists:seq(16#06F0, 16#06F9),
     Digits = gb_sets:from_list(Digits0),
     rel_op_combinations_1(16#0700, Digits),
+    false = is_digit(-1 bsl 59),
+    false = is_digit(-1 bsl 64),
+    false = is_digit((1 bsl 59) - 1),
+    false = is_digit(1 bsl 64),
 
     BrokenRange0 = lists:seq(3, 5) ++
 	lists:seq(10, 12) ++ lists:seq(14, 20),
     BrokenRange = gb_sets:from_list(BrokenRange0),
     rel_op_combinations_2(30, BrokenRange),
+    false = broken_range(-1 bsl 64),
+    false = broken_range(1 bsl 64),
 
     Red0 = [{I,2*I} || I <- lists:seq(0, 50)] ++
 	[{I,5*I} || I <- lists:seq(51, 80)],
     Red = gb_trees:from_orddict(Red0),
     rel_op_combinations_3(100, Red),
+    2 * (-1 bsl 64) = redundant(-1 bsl 64),
+    none = redundant(1 bsl 64),
 
     rel_op_combinations_4(),
 
@@ -1432,6 +1545,10 @@ rel_op_combinations_1(0, _) ->
     ok;
 rel_op_combinations_1(N, Digits) ->
     Bool = gb_sets:is_member(N, Digits),
+    Bool = is_digit(N),
+    rel_op_combinations_1(N-1, Digits).
+
+is_digit(N) ->
     Bool = is_digit_1(N),
     Bool = is_digit_2(N),
     Bool = is_digit_3(N),
@@ -1442,8 +1559,7 @@ rel_op_combinations_1(N, Digits) ->
     Bool = is_digit_8(N),
     Bool = is_digit_9(42, N),
     Bool = is_digit_10(N, 0),
-    Bool = is_digit_11(N, 0),
-    rel_op_combinations_1(N-1, Digits).
+    Bool = is_digit_11(N, 0).
 
 is_digit_1(X) when 16#0660 =< X, X =< 16#0669 -> true;
 is_digit_1(X) when 16#0030 =< X, X =< 16#0039 -> true;
@@ -1508,6 +1624,10 @@ rel_op_combinations_2(0, _) ->
     ok;
 rel_op_combinations_2(N, Range) ->
     Bool = gb_sets:is_member(N, Range),
+    Bool = broken_range(N),
+    rel_op_combinations_2(N-1, Range).
+
+broken_range(N) ->
     Bool = broken_range_1(N),
     Bool = broken_range_2(N),
     Bool = broken_range_3(N),
@@ -1520,8 +1640,7 @@ rel_op_combinations_2(N, Range) ->
     Bool = broken_range_10(N),
     Bool = broken_range_11(N),
     Bool = broken_range_12(N),
-    Bool = broken_range_13(N),
-    rel_op_combinations_2(N-1, Range).
+    Bool = broken_range_13(N).
 
 broken_range_1(X) when X >= 10, X =< 20, X =/= 13 -> true;
 broken_range_1(X) when X >= 3, X =< 5 -> true;
@@ -1593,6 +1712,10 @@ rel_op_combinations_3(N, Red) ->
 	      none -> none;
 	      {value,V} -> V
 	  end,
+    Val = redundant(N),
+    rel_op_combinations_3(N-1, Red).
+
+redundant(N) ->
     Val = redundant_1(N),
     Val = redundant_2(N),
     Val = redundant_3(N),
@@ -1604,8 +1727,7 @@ rel_op_combinations_3(N, Red) ->
     Val = redundant_9(N),
     Val = redundant_10(N),
     Val = redundant_11(N),
-    Val = redundant_12(N),
-    rel_op_combinations_3(N-1, Red).
+    Val = redundant_12(N).
 
 redundant_1(X) when X >= 51, X =< 80 -> 5*X;
 redundant_1(X) when X < 51 -> 2*X;
@@ -2297,6 +2419,8 @@ binary_part(Config) when is_list(Config) ->
 		    true ->
 			error
 		end,
+    error = bp_coverage_1(id(<<>>)),
+
     ok.
 
 
@@ -2353,6 +2477,11 @@ bptest(B,A,C) when erlang:binary_part(B,A,C) =:= <<1>> ->
 bptest(B,A,C)  when erlang:binary_part(B,{A,C}) =:= <<3,3>> ->
     3;
 bptest(_,_,_) ->
+    error.
+
+bp_coverage_1(A) when binary_part(A, A, floor(float(0))) ->
+    ok;
+bp_coverage_1(_) ->
     error.
 
 -define(FAILING(C),
@@ -2507,6 +2636,13 @@ beam_bool_SUITE(_Config) ->
     erl1384(),
     gh4788(),
     beam_ssa_bool_coverage(),
+    bad_map_in_guard(),
+    gh_6164(),
+    gh_6184(),
+    gh_7252(),
+    gh_7339(),
+    gh_7370(),
+    gh_7517(),
     ok.
 
 before_and_inside_if() ->
@@ -2640,7 +2776,7 @@ welcome({perfect, Profit}) ->
 maps() ->
     ok = evidence(#{0 => 42}).
 
-%% Cover handling of put_map in in split_block_label_used/2.
+%% Cover handling of put_map in split_block_label_used/2.
 evidence(#{0 := Charge}) when 0; #{[] => Charge} == #{[] => 42} ->
     ok.
 
@@ -3004,6 +3140,27 @@ do_gh4788(N) ->
 beam_ssa_bool_coverage() ->
     {"*","abc"} = collect_modifiers("abc*", []),
     error = beam_ssa_bool_coverage_1(true),
+
+    ok = beam_ssa_bool_coverage_2(self()),
+    ok = beam_ssa_bool_coverage_2(true),
+    error = beam_ssa_bool_coverage_2(false),
+    error = beam_ssa_bool_coverage_2(42),
+
+    error = beam_ssa_bool_coverage_3(42),
+    error = beam_ssa_bool_coverage_3(a),
+
+    error = beam_ssa_bool_coverage_4(42, 42),
+    error = beam_ssa_bool_coverage_4(ok, ok),
+    error = beam_ssa_bool_coverage_4(a, b),
+
+    ok = beam_ssa_bool_coverage_5(ok),
+    ok = beam_ssa_bool_coverage_5(2.0),
+    ok = beam_ssa_bool_coverage_5(42),
+
+    ok = beam_ssa_bool_coverage_6(<<>>),
+    error = beam_ssa_bool_coverage_6(a),
+    error = beam_ssa_bool_coverage_6(42),
+
     ok.
 
 collect_modifiers([H | T], Buffer)
@@ -3017,6 +3174,140 @@ beam_ssa_bool_coverage_1(V) when V andalso 0, tuple_size(0) ->
     ok;
 beam_ssa_bool_coverage_1(_) ->
     error.
+
+beam_ssa_bool_coverage_2(A) when is_pid(A) andalso true; A ->
+    ok;
+beam_ssa_bool_coverage_2(_) ->
+    error.
+
+beam_ssa_bool_coverage_3(A) when ok; ((ok =< A + 1) or false) and true orelse ok ->
+    ok;
+beam_ssa_bool_coverage_3(_) ->
+    error.
+
+beam_ssa_bool_coverage_4(A, A) when ok == A andalso ok ->
+    ok;
+beam_ssa_bool_coverage_4(_, _) ->
+    error.
+
+beam_ssa_bool_coverage_5(A) ->
+    maybe
+        case case maybe ok end of
+                 2.0 ->
+                     false;
+                 A ->
+                     true;
+                 _ ->
+                     true
+             end of
+            true ->
+                ok;
+            _ ->
+                error
+        end
+    end.
+
+beam_ssa_bool_coverage_6(A) when is_bitstring(A) orelse ok;
+                                 is_bitstring(A) andalso ok bsr ok ->
+    ok;
+beam_ssa_bool_coverage_6(_) ->
+    error.
+
+
+gh_6164() ->
+    true = do_gh_6164(id([])),
+    {'EXIT',{{case_clause,42},_}} = catch do_gh_6164(id(0)),
+
+    ok.
+
+do_gh_6164(V1) ->
+    case 42 of
+        V2 ->
+            case is_list(V1) of
+                V3 ->
+                    case V3 orelse V2 of
+                        _ when V3 -> 100
+                    end =< V3
+            end
+    end.
+
+gh_6184() ->
+    {'EXIT',{function_clause,_}} = catch do_gh_6184(id(true), id({a,b,c})),
+    {'EXIT',{function_clause,_}} = catch do_gh_6184(true, true),
+    {'EXIT',{function_clause,_}} = catch do_gh_6184({a,b,c}, {x,y,z}),
+
+    ok.
+
+do_gh_6184(V1, V2) when (false and is_tuple(V2)) andalso (V1 orelse V2) ->
+    V2 orelse V2.
+
+-record(bad_map_in_guard, {name}).
+bad_map_in_guard() ->
+    error = bad_map_in_guard_1().
+
+bad_map_in_guard_1() when (a#{key => value})#bad_map_in_guard.name ->
+    ok;
+bad_map_in_guard_1() ->
+    error.
+
+gh_7252() ->
+    bar = gh_7252_a(id(bar), id([])),
+    bar = gh_7252_a(id(bar), id(ok)),
+
+    foo = gh_7252_b(id(ok), id(<<>>)),
+    bar = gh_7252_b(id(ok), id(ok)),
+
+    bar = gh_7252_c(id(ok)),
+
+    ok.
+
+gh_7252_a(_, B) when ((ok == B) and (ok =/= trunc(ok))) or (ok < B) ->
+    foo;
+gh_7252_a(A, _) ->
+    A.
+
+gh_7252_b(A, B)
+  when (true xor is_float(A)) or (is_bitstring(B) orelse <<(ok):(ok)>>) ->
+    foo;
+gh_7252_b(_, _) ->
+    bar.
+
+gh_7252_c(A) when ((ok > A) and ((bnot ok) =:= ok)) or (not (ok > A)) ->
+    foo;
+gh_7252_c(_) ->
+    bar.
+
+gh_7339() ->
+    b = do_gh_7339(id(42)),
+    b = do_gh_7339(id(42.0)),
+    b = do_gh_7339(id(#{})),
+    ok.
+
+do_gh_7339(M) when is_number(M) or (not is_map(M#{a => b})) ->
+  a;
+do_gh_7339(_) ->
+  b.
+
+gh_7370() ->
+    b = gh_7370(id(42)),
+    b = gh_7370(id(42.0)),
+    ok.
+
+gh_7370(A) when (not (not is_float(A))) =/= ((ok and ok) or true) ->
+    a;
+gh_7370(_) ->
+    b.
+
+gh_7517() ->
+    ok = catch do_gh_7517([]),
+    ok = catch do_gh_7517([a,b,c]),
+    {'EXIT',{function_clause,_}} = catch do_gh_7517(ok),
+    {'EXIT',{function_clause,_}} = catch do_gh_7517(<<>>),
+    ok.
+
+do_gh_7517(A) when (ok /= A) or is_float(is_list(A) orelse ok andalso ok) ->
+    ok.
+
 
 %%%
 %%% End of beam_bool_SUITE tests.
@@ -3056,6 +3347,18 @@ use_after_branch_1(A) ->
     case Boolean of
         true -> {id(Boolean), gurka};
         false -> {id(Boolean), gaffel}
+    end.
+
+%% GH-8733: Benign bug where {succeeded,body} was emitted in a guard context,
+%% crashing the compiler when +no_bool_opt was specified.
+body_in_guard(_Config) ->
+    Pid = self(),
+    Mon = monitor(process, Pid),
+    receive
+        {'DOWN', Mon, process, Pid, _} ->
+            ok
+    after 0 ->
+        demonitor(Mon)
     end.
 
 %% Call this function to turn off constant propagation.

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1998-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1998-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,10 +20,11 @@
 %% Purpose: Maintain atom, import, export, and other tables for assembler.
 
 -module(beam_dict).
+-moduledoc false.
 
 -export([new/0,opcode/2,highest_opcode/1,
 	 atom/2,local/4,export/4,import/4,
-	 string/2,lambda/3,literal/2,line/2,fname/2,type/2,
+	 string/2,lambda/3,literal/2,line/3,fname/2,type/2,
 	 atom_table/1,local_table/1,export_table/1,import_table/1,
 	 string_table/1,lambda_table/1,literal_table/1,
 	 line_table/1,type_table/1]).
@@ -58,6 +59,7 @@
          fnames = #{}               :: fname_tab(),
          lines = #{}                :: line_tab(),
          num_lines = 0              :: non_neg_integer(), %Number of line instructions
+         exec_line = false          :: boolean(),
          next_import = 0            :: non_neg_integer(),
          string_offset = 0          :: non_neg_integer(),
          next_literal = 0           :: non_neg_integer(),
@@ -201,23 +203,29 @@ literal1(Key, #asm{literals=Tab0,next_literal=NextIndex}=Dict) ->
 
 %% Returns the index for a line instruction (adding information
 %% to the location information table).
--spec line(list(), bdict()) -> {non_neg_integer(), bdict()}.
+-spec line(list(), bdict(), 'line' | 'executable_line') ->
+          {non_neg_integer(), bdict()}.
 
-line([], #asm{num_lines=N}=Dict) ->
+line([], #asm{num_lines=N}=Dict, Instr) when is_atom(Instr) ->
     %% No location available. Return the special pre-defined
     %% index 0.
     {0,Dict#asm{num_lines=N+1}};
-line([{location,Name,Line}|_], #asm{lines=Lines,num_lines=N}=Dict0) ->
+line([{location,Name,Line}|_], #asm{lines=Lines,num_lines=N,
+                                    exec_line=ExecLine0}=Dict0, Instr)
+  when is_atom(Instr) ->
     {FnameIndex,Dict1} = fname(Name, Dict0),
     Key = {FnameIndex,Line},
+    ExecLine = ExecLine0 or (Instr =:= executable_line),
     case Lines of
-        #{Key := Index} -> {Index,Dict1#asm{num_lines=N+1}};
+        #{Key := Index} ->
+            {Index,Dict1#asm{num_lines=N+1,exec_line=ExecLine}};
         _ ->
-	    Index = maps:size(Lines) + 1,
-            {Index, Dict1#asm{lines=Lines#{Key=>Index},num_lines=N+1}}
+            Index = map_size(Lines) + 1,
+            {Index, Dict1#asm{lines=Lines#{Key=>Index},num_lines=N+1,
+                              exec_line=ExecLine}}
     end;
-line([_|T], #asm{}=Dict) ->
-    line(T, Dict).
+line([_|T], #asm{}=Dict, Instr) ->
+    line(T, Dict, Instr).
 
 -spec fname(nonempty_string(), bdict()) ->
                    {non_neg_integer(), bdict()}.
@@ -253,7 +261,7 @@ atom_table(#asm{atoms=Atoms}) ->
     {NumAtoms,[begin
                    L = atom_to_binary(A, utf8),
                    [byte_size(L),L]
-               end || {A,_} <- Sorted]}.
+               end || {A,_} <:- Sorted]}.
 
 %% Returns the table of local functions.
 %%    local_table(Dict) -> {NumLocals, [{Function, Arity, Label}...]}
@@ -275,7 +283,7 @@ export_table(#asm{exports = Exports}) ->
 
 import_table(#asm{imports=Imp,next_import=NumImports}) ->
     Sorted = lists:keysort(2, gb_trees:to_list(Imp)),
-    ImpTab = [MFA || {MFA,_} <- Sorted],
+    ImpTab = [MFA || {MFA,_} <:- Sorted],
     {NumImports,ImpTab}.
 
 -spec string_table(bdict()) -> {non_neg_integer(), binary()}.
@@ -287,15 +295,15 @@ string_table(#asm{strings=Strings,string_offset=Size}) ->
 
 lambda_table(#asm{locals=Loc0,exports=Ext0,lambdas={NumLambdas,Lambdas0}}) ->
     Lambdas1 = sofs:relation(Lambdas0),
-    Loc = sofs:relation([{Lbl,{F,A}} || {F,A,Lbl} <- Loc0]),
-    Ext = sofs:relation([{Lbl,{F,A}} || {F,A,Lbl} <- Ext0]),
+    Loc = sofs:relation([{Lbl,{F,A}} || {F,A,Lbl} <:- Loc0]),
+    Ext = sofs:relation([{Lbl,{F,A}} || {F,A,Lbl} <:- Ext0]),
     All = sofs:union(Loc, Ext),
     Lambdas2 = sofs:relative_product1(Lambdas1, All),
     %% Initialize OldUniq to 0. It will be set to an unique value
     %% based on the MD5 checksum of the BEAM code for the module.
     OldUniq = 0,
     Lambdas = [<<F:32,A:32,Lbl:32,Index:32,NumFree:32,OldUniq:32>> ||
-                  {{Index,Lbl,NumFree},{F,A}} <- sofs:to_external(Lambdas2)],
+                  {{Index,Lbl,NumFree},{F,A}} <:- sofs:to_external(Lambdas2)],
     {NumLambdas,Lambdas}.
 
 %% Returns the literal table.
@@ -310,7 +318,7 @@ literal_table(#asm{literals=Tab,next_literal=NumLiterals}) ->
 			   [{Num,Lit}|Acc]
 		   end, [], Tab),
     L1 = lists:sort(L0),
-    L = [[<<(byte_size(Term)):32>>,Term] || {_,Term} <- L1],
+    L = [[<<(byte_size(Term)):32>>,Term] || {_,Term} <:- L1],
     {NumLiterals,L}.
 
 my_term_to_binary(Term) ->
@@ -337,16 +345,18 @@ build_type_table([], Acc) ->
 -spec line_table(bdict()) ->
     {non_neg_integer(),				%Number of line instructions.
      non_neg_integer(),[string()],
-     non_neg_integer(),[{non_neg_integer(),non_neg_integer()}]}.
+     non_neg_integer(),[{non_neg_integer(),non_neg_integer()}],
+     boolean()}.
 
-line_table(#asm{fnames=Fnames0,lines=Lines0,num_lines=NumLineInstrs}) ->
+line_table(#asm{fnames=Fnames0,lines=Lines0,
+                num_lines=NumLineInstrs,exec_line=ExecLine}) ->
     NumFnames = maps:size(Fnames0),
     Fnames1 = lists:keysort(2, maps:to_list(Fnames0)),
-    Fnames = [Name || {Name,_} <- Fnames1],
+    Fnames = [Name || {Name,_} <:- Fnames1],
     NumLines = maps:size(Lines0),
     Lines1 = lists:keysort(2, maps:to_list(Lines0)),
-    Lines = [L || {L,_} <- Lines1],
-    {NumLineInstrs,NumFnames,Fnames,NumLines,Lines}.
+    Lines = [L || {L,_} <:- Lines1],
+    {NumLineInstrs,NumFnames,Fnames,NumLines,Lines,ExecLine}.
 
 %% Search for binary string Str in the binary string pool Pool.
 %%    old_string(Str, Pool) -> none | Index

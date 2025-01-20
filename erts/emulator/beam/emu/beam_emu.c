@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -138,9 +138,9 @@ ErtsCodePtr beam_return_trace;
 static BeamInstr beam_exception_trace_[1];
 ErtsCodePtr beam_exception_trace;
 
-/* OpCode(i_return_time_trace) */
-static BeamInstr beam_return_time_trace_[1];
-ErtsCodePtr beam_return_time_trace;
+/* OpCode(i_call_trace_return) */
+static BeamInstr beam_call_trace_return_[1];
+ErtsCodePtr beam_call_trace_return;
 
 /* The address field of every fun that has no loaded code will point to
  * beam_unloaded_fun[]. The -1 in beam_unloaded_fun[0] will be interpreted
@@ -266,10 +266,10 @@ void process_main(ErtsSchedulerData *esdp)
     ERTS_DECLARE_DUMMY(Eterm pid);
 #endif
 
-    /* Pointer to X registers: x(1)..x(N); reg[0] is used when doing GC,
-     * in all other cases x0 is used.
+    /*
+     * Pointer to X registers: x(0)..x(N).
      */
-    register Eterm* reg = NULL;
+    register Eterm* reg REG_xregs = NULL;
 
     /*
      * Top of heap (next free location); grows upwards.
@@ -313,12 +313,12 @@ void process_main(ErtsSchedulerData *esdp)
 #endif
 #endif
 
+    Uint bitdata = 0;
+
     Uint64 start_time = 0;          /* Monitor long schedule */
     ErtsCodePtr start_time_i = NULL;
 
     ERTS_MSACC_DECLARE_CACHE_X() /* a cached value of the tsd pointer for msacc */
-
-    ERL_BITS_DECLARE_STATEP; /* Has to be last declaration */
 
     /*
      * Note: In this function, we attempt to place rarely executed code towards
@@ -377,7 +377,6 @@ void process_main(ErtsSchedulerData *esdp)
 	start_time_i = c_p->i;
     }
 
-    ERL_BITS_RELOAD_STATEP(c_p);
     {
 	int reds;
 	BeamInstr next;
@@ -529,7 +528,7 @@ void process_main(ErtsSchedulerData *esdp)
          * code[3]: &&call_error_handler
          * code[4]: Not used
          */
-        Export *error_handler;
+        const Export *error_handler;
 
         HEAVY_SWAPOUT;
         error_handler = call_error_handler(c_p, erts_code_to_codemfa(I),
@@ -550,7 +549,7 @@ void process_main(ErtsSchedulerData *esdp)
      if (I == 0) {
 	 goto do_schedule;
      } else {
-	 ASSERT(!is_value(r(0)));
+	 ASSERT(!is_value(x(0)));
 	 SWAPIN;
 	 Goto(*I);
      }
@@ -629,9 +628,11 @@ static void install_bifs(void) {
 
         entry = &bif_table[i];
 
+        ERTS_ASSERT(entry->arity <= MAX_BIF_ARITY);
+
         ep = erts_export_put(entry->module, entry->name, entry->arity);
 
-        ep->info.op = BeamOpCodeAddr(op_i_func_info_IaaI);
+        ep->info.u.op = BeamOpCodeAddr(op_i_func_info_IaaI);
         ep->info.mfa.module = entry->module;
         ep->info.mfa.function = entry->name;
         ep->info.mfa.arity = entry->arity;
@@ -694,8 +695,8 @@ init_emulator_finish(void)
     beam_exception_trace_[0]   = BeamOpCodeAddr(op_return_trace); /* UGLY */
     beam_exception_trace = (ErtsCodePtr)&beam_exception_trace_[0];
 
-    beam_return_time_trace_[0] = BeamOpCodeAddr(op_i_return_time_trace);
-    beam_return_time_trace = (ErtsCodePtr)&beam_return_time_trace_[0];
+    beam_call_trace_return_[0] = BeamOpCodeAddr(op_i_call_trace_return);
+    beam_call_trace_return = (ErtsCodePtr)&beam_call_trace_return_[0];
 
     install_bifs();
 }

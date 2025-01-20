@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2006-2020. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1099,9 +1099,9 @@ finalize_exec(Port *pp, ErtsPortTask **execq, int processing_busy_q)
 	    break;
     }
 
-    if (prof_runnable_ports | IS_TRACED_FL(pp, F_TRACE_SCHED_PORTS)) {
+    if (prof_runnable_ports | ERTS_IS_P_TRACED_FL(pp, F_TRACE_SCHED_PORTS)) {
 	/* trace port scheduling, out */
-	if (IS_TRACED_FL(pp, F_TRACE_SCHED_PORTS))
+	if (ERTS_IS_P_TRACED_FL(pp, F_TRACE_SCHED_PORTS))
 	    trace_sched_ports(pp, am_out);
 	if (prof_runnable_ports) {
 	    if (!(act & (ERTS_PTS_FLG_EXEC_IMM|ERTS_PTS_FLG_HAVE_TASKS)))
@@ -1326,22 +1326,22 @@ erts_port_task_abort(ErtsPortTaskHandle *pthp)
 	    res = - 1; /* Task already aborted, executing, or executed */
 	else {
 	    reset_port_task_handle(pthp);
-
 #if ERTS_POLL_USE_SCHEDULER_POLLING
-            switch (ptp->type) {
-	    case ERTS_PORT_TASK_INPUT:
-	    case ERTS_PORT_TASK_OUTPUT:
-                if (ptp->u.alive.td.io.is_scheduler_event) {
-                    ASSERT(erts_atomic_read_nob(
-                               &erts_port_task_outstanding_io_tasks) > 0);
-                    erts_atomic_dec_relb(&erts_port_task_outstanding_io_tasks);
+            if (erts_sched_poll_enabled()) {
+                switch (ptp->type) {
+                case ERTS_PORT_TASK_INPUT:
+                case ERTS_PORT_TASK_OUTPUT:
+                    if (ptp->u.alive.td.io.is_scheduler_event) {
+                        ASSERT(erts_atomic_read_nob(
+                                   &erts_port_task_outstanding_io_tasks) > 0);
+                        erts_atomic_dec_relb(&erts_port_task_outstanding_io_tasks);
+                    }
+                    break;
+                default:
+                    break;
                 }
-		break;
-	    default:
-		break;
-	    }
+            }
 #endif
-
 	    res = 0;
 	}
     }
@@ -1704,7 +1704,7 @@ erts_port_task_execute(ErtsRunQueue *runq, Port **curr_port_pp)
     erts_port_lock(pp);
 
     /* trace port scheduling, in */
-    if (IS_TRACED_FL(pp, F_TRACE_SCHED_PORTS)) {
+    if (ERTS_IS_P_TRACED_FL(pp, F_TRACE_SCHED_PORTS)) {
 	trace_sched_ports(pp, am_in);
     }
 
@@ -1748,8 +1748,8 @@ erts_port_task_execute(ErtsRunQueue *runq, Port **curr_port_pp)
 		if (!(state & ERTS_PORT_SFLGS_DEAD)) {
 		    DTRACE_DRIVER(driver_timeout, pp);
 		    LTTNG_DRIVER(driver_timeout, pp);
-                    if (IS_TRACED_FL(pp, F_TRACE_RECEIVE))
-                        trace_port(pp, am_receive, am_timeout);
+                    if (ERTS_IS_P_TRACED_FL(pp, F_TRACE_RECEIVE))
+                        trace_port(pp, am_receive, am_timeout, F_TRACE_RECEIVE);
 		    (*pp->drv_ptr->timeout)((ErlDrvData) pp->drv_data);
 		}
 	    }
@@ -1844,16 +1844,14 @@ erts_port_task_execute(ErtsRunQueue *runq, Port **curr_port_pp)
     }
 
     ERTS_MSACC_POP_STATE_M();
-
 #if ERTS_POLL_USE_SCHEDULER_POLLING
-    if (io_tasks_executed) {
+    if (erts_sched_poll_enabled() && io_tasks_executed) {
         ASSERT(erts_atomic_read_nob(&erts_port_task_outstanding_io_tasks)
 	       >= io_tasks_executed);
         erts_atomic_add_relb(&erts_port_task_outstanding_io_tasks,
 				 -1*io_tasks_executed);
     }
 #endif
-
     ASSERT(runq == erts_get_runq_port(pp));
 
     active = finalize_exec(pp, &execq, processing_busy_q);

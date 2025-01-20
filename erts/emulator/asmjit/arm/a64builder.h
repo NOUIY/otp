@@ -29,14 +29,7 @@ public:
   //! \{
 
   ASMJIT_API explicit Builder(CodeHolder* code = nullptr) noexcept;
-  ASMJIT_API virtual ~Builder() noexcept;
-
-  //! \}
-
-  //! \name Finalize
-  //! \{
-
-  ASMJIT_API Error finalize() override;
+  ASMJIT_API ~Builder() noexcept override;
 
   //! \}
 
@@ -44,6 +37,14 @@ public:
   //! \{
 
   ASMJIT_API Error onAttach(CodeHolder* code) noexcept override;
+  ASMJIT_API Error onDetach(CodeHolder* code) noexcept override;
+
+  //! \}
+
+  //! \name Finalize
+  //! \{
+
+  ASMJIT_API Error finalize() override;
 
   //! \}
 };

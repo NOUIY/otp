@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2000-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2023. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -95,6 +95,7 @@ notify(X) ->
 	 test_basic/1,test_cmp/1,test_range/1,test_spread/1,
 	 test_phash2/1,otp_5292/1,bit_level_binaries/1,otp_7127/1,
          test_hash_zero/1, init_per_suite/1, end_per_suite/1,
+         init_per_testcase/2, end_per_testcase/2,
          init_per_group/2, end_per_group/2]).
 
 suite() ->
@@ -169,6 +170,10 @@ init_per_group(_, Config) ->
 end_per_group(_, Config) ->
     Config.
 
+init_per_testcase(_TestCase, Config) ->
+    Config.
+end_per_testcase(_TestCase, Config) ->
+    erts_test_utils:ept_check_leaked_nodes(Config).
 
 %% Tests basic functionality of erlang:phash and that the
 %% hashes has not changed (neither hash nor phash)
@@ -219,7 +224,7 @@ notify(X) ->
 %%
 basic_test() ->
     685556714 = erlang:phash({a,b,c},16#FFFFFFFF),
-    37442646 =  erlang:phash([a,b,c,{1,2,3},c:pid(0,2,3),
+    37442646 =  erlang:phash([a,b,c,{1,2,3},c:pid(0,2,0),
 				    16#77777777777777],16#FFFFFFFF),
     ExternalReference = <<131,114,0,3,100,0,13,110,111,110,111,100,101,64,
 			 110,111,104,111,115,116,0,0,0,0,122,0,0,0,0,0,0,0,0>>,
@@ -704,21 +709,20 @@ run_when_enough_resources(Fun) ->
                            [Mem, Bits, Build])}
     end.
 
-%% Total memory in GB
 total_memory() ->
+    %% Total memory in GB.
     try
-        MemoryData = memsup:get_system_memory_data(),
-        case lists:keysearch(total_memory, 1, MemoryData) of
-            {value, {total_memory, TM}} ->
-        	TM div (1024*1024*1024);
-            false ->
-        	{value, {system_total_memory, STM}} =
-        	    lists:keysearch(system_total_memory, 1, MemoryData),
-        	STM div (1024*1024*1024)
-        end
+	SMD = memsup:get_system_memory_data(),
+        TM = proplists:get_value(
+               available_memory, SMD,
+               proplists:get_value(
+                 total_memory, SMD,
+                 proplists:get_value(
+                   system_total_memory, SMD))),
+        TM div (1024*1024*1024)
     catch
-        _ : _ ->
-            undefined
+	_ : _ ->
+	    undefined
     end.
 
 -ifdef(FALSE).
@@ -831,9 +835,10 @@ hash_zero_test() ->
 hash_zero_test([Z|Zs],F) ->
     hash_zero_test(Zs,Z,F(Z),F).
 hash_zero_test([Z|Zs],Z0,V,F) ->
-    true = Z0 =:= Z, %% assert exact equal
-    Z0   = Z,        %% assert matching
-    V    = F(Z),     %% assert hash
+    true = (0.0 == Z0) andalso (0.0 == Z),
+    %% assert that phash and phash2 yield the same hash for both -0.0 and +0.0,
+    %% even though they are different terms since OTP 27.
+    V    = F(Z),
     hash_zero_test(Zs,Z0,V,F);
 hash_zero_test([],_,_,_) ->
     ok.

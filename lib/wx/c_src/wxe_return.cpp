@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2008-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2008-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,8 +43,11 @@ wxeReturn::~wxeReturn () {
 int wxeReturn::send(ERL_NIF_TERM msg) {
   int res;
   if(wxe_debug) {
-    if(isResult)
-      enif_fprintf(stderr, "return to %T:  %T\r\n", caller, msg);
+    if(isResult) {
+      enif_fprintf(stderr, "return to %T: ", caller);
+      wx_print_term(env, msg);
+      enif_fprintf(stderr, "\r\n");
+    }
   }
   if(isResult) {
     res = enif_send(NULL, &caller, env,
@@ -409,7 +412,7 @@ ERL_NIF_TERM  wxeReturn::make(wxGBSpan val) {
 
 INLINE
 ERL_NIF_TERM  wxeReturn::make(wxMouseState val) {
-  return enif_make_tuple(env, 11,
+  return enif_make_tuple(env, 13,
                          enif_make_atom(env, "wxMouseState"),
                          // TODO not int?
                          enif_make_uint(env, val.GetX()),
@@ -421,7 +424,9 @@ ERL_NIF_TERM  wxeReturn::make(wxMouseState val) {
                          make_bool(val.ShiftDown()),
                          make_bool(val.AltDown()),
                          make_bool(val.MetaDown()),
-                         make_bool(val.CmdDown())
+                         make_bool(val.CmdDown()),
+                         make_bool(val.Aux1IsDown()),
+                         make_bool(val.Aux2IsDown())
                          );
 }
 

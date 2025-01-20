@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 %% See also: $ERL_TOP/lib/kernel/AUTHORS
 %%
 -module(inet6_sctp).
+-moduledoc false.
 
 %% This module provides functions for communicating with
 %% sockets using the SCTP protocol.  The implementation assumes that
@@ -31,7 +32,7 @@
 -include("inet_int.hrl").
 
 -export([getserv/1, getaddr/1, getaddr/2, translate_ip/1]).
--export([open/1, close/1, listen/2, peeloff/2, connect/4, connect/5]).
+-export([open/1, close/1, listen/2, peeloff/2, connect/4, connect/5, connectx/3, connectx/4]).
 -export([sendmsg/3, send/4, recv/2]).
 
 -define(PROTO,  sctp).
@@ -69,17 +70,40 @@ listen(S, Flag) ->
 
 peeloff(S, AssocId) ->
     case prim_inet:peeloff(S, AssocId) of
-	{ok, NewS}=Result ->
+	{ok, NewS} ->
 	    inet_db:register_socket(NewS, ?MODULE),
-	    Result;
+            peeloff_opts(S, NewS);
 	Error -> Error
     end.
+
+peeloff_opts(S, NewS) ->
+    InheritOpts =
+        [active, sctp_nodelay, priority, linger, reuseaddr,
+         tclass, recvtclass],
+    case prim_inet:getopts(S, InheritOpts) of
+        {ok, Opts} ->
+            case prim_inet:setopts(S, Opts) of
+                ok ->
+                    {ok, NewS};
+                Error1 ->
+                    close(NewS), Error1
+            end;
+        Error2 ->
+            close(NewS), Error2
+    end.
+
 
 connect(S, SockAddr, Opts, Timer) ->
     inet_sctp:connect(S, SockAddr, Opts, Timer).
 
 connect(S, Addr, Port, Opts, Timer) ->
     inet_sctp:connect(S, Addr, Port, Opts, Timer).
+
+connectx(S, SockAddrs, Opts) ->
+    inet_sctp:connectx(S, SockAddrs, Opts).
+
+connectx(S, Addr, Port, Opts) ->
+    inet_sctp:connectx(S, Addr, Port, Opts).
 
 sendmsg(S, SRI, Data) ->
     prim_inet:sendmsg(S, SRI, Data).

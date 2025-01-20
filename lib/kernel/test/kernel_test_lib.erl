@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2020-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2020-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
 
 -export([init_per_suite/1,
          end_per_suite/1]).
--export([tc_try/3]).
+-export([tc_try/2, tc_try/3, tc_try/4, tc_try/5]).
 -export([socket_type/1,
 	 listen/3,
          connect/4, connect/5,
@@ -30,18 +30,32 @@
          is_socket_backend/1,
          inet_backend_opts/1,
          explicit_inet_backend/0,
-         test_inet_backends/0]).
--export([start_slave_node/2, start_slave_node/3,
-         start_node/3, start_node/4,
+         test_inet_backends/0,
+         which_inet_backend/1,
+         config_inet_backend/2]).
+-export([start_node/2, start_node/3,
          stop_node/1]).
 -export([f/2,
-         print/1, print/2]).
+         print/1, print/2,
+         formated_timestamp/0]).
 -export([good_hosts/1,
          lookup/3]).
+-export([
+         os_cmd/1, os_cmd/2,
+         mq/0, mq/1,
+         ts/0, ts/1
+        ]).
 
 -export([
+         proxy_call/3,
+
+         ensure_not_dog_slow/2,
+
          %% Generic 'has support' test function(s)
+         is_socket_supported/0,
+         has_support_ipv4/0,
          has_support_ipv6/0,
+	 has_support_unix_domain_socket/0,
 
          which_local_host_info/1, which_local_host_info/2,
          which_local_addr/1, which_link_local_addr/1,
@@ -51,8 +65,13 @@
          skip/1
         ]).
 
+%% Convenient exports...
+-export([analyze_and_print_host_info/0]).
 
 -include("kernel_test_lib.hrl").
+
+-define(DBG(F, A), dbg(F, A)).
+-define(DBG(F),    ?DBG(F, [])).
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -84,17 +103,43 @@ init_per_suite(AllowSkip, Config) when is_boolean(AllowSkip) ->
                 true ->
                     {skip, "Unstable host and/or os (or combo thererof)"};
                 false ->
-                    kernel_test_global_sys_monitor:start(),
-                    [{kernel_factor, Factor} | Config]
+                    print("try start (global) system monitor"),
+                    case kernel_test_global_sys_monitor:start() of
+                        {ok, _} ->
+                            print("(global) system monitor started"),
+                            case lists:keysearch(label, 1, HostInfo) of
+                                {value, Label} ->
+                                    [{kernel_factor, Factor}, Label | Config];
+                                false ->
+                                    [{kernel_factor, Factor} | Config]
+                            end;
+                        {error, Reason} ->
+                            print("Failed start (global) system monitor:"
+                                  "~n      ~p", [Reason]),
+                            {skip, "Failed start (global) system monitor"}
+                    end
             catch
                 throw:{skip, _} = SKIP ->
                     SKIP
             end;
 
-        {Factor, _HostInfo} when (AllowSkip =:= false) andalso
+        {Factor, HostInfo} when (AllowSkip =:= false) andalso
                                  is_integer(Factor) ->
-            [{kernel_factor, Factor} | Config]
-
+            print("try start (global) system monitor"),
+            case kernel_test_global_sys_monitor:start() of
+                {ok, _} ->
+                    print("(global) system monitor started"),
+                    case lists:keysearch(label, 1, HostInfo) of
+                        {value, Label} ->
+                            [{kernel_factor, Factor}, Label | Config];
+                        false ->
+                            [{kernel_factor, Factor} | Config]
+                    end;
+                {error, Reason} ->
+                    print("Failed start (global) system monitor:"
+                          "~n      ~p", [Reason]),
+                    [{kernel_factor, Factor} | Config]
+            end
     catch
         throw:{skip, _} = SKIP ->
             SKIP
@@ -139,48 +184,372 @@ analyze_and_print_host_info() ->
     end.
 
 linux_which_distro(Version) ->
+    try do_linux_which_distro(Version)
+    catch
+        throw:{distro, DistroAndLabel} ->
+            DistroAndLabel
+    end.
+
+do_linux_which_distro(Version) ->
+    Label = ts_extra_platform_label(),
+
+    %% Many (linux) distro's use the /etc/issue file, so try that first.
+    %% Then we just keep going until we are "done".
+    DistroStr = do_linux_which_distro_issue(Version, Label),
+
+    %% Still not sure; try fedora
+    _ = do_linux_which_distro_fedora(Version, Label),
+
+    %% Still not sure; try suse
+    _ = do_linux_which_distro_suse(Version, Label),
+
+    %% Still not sure; try os-release
+    _ = do_linux_which_distro_os_release(Version, Label),
+
+    %% And the fallback
+    io:format("Linux: ~s"
+              "~n   Distro:       ~s"
+              "~n   Label:        ~s"
+              "~n   Product Name: ~s"
+              "~n",
+              [Version, DistroStr, Label,
+               linux_product_name()]),
+    {other, simplify_label(Label)}.
+
+do_linux_which_distro_issue(Version, Label) ->
     case file:read_file_info("/etc/issue") of
         {ok, _} ->
             case [string:trim(S) ||
                      S <- string:tokens(os:cmd("cat /etc/issue"), [$\n])] of
-                [DistroStr|_] ->
-                    io:format("Linux: ~s"
-                              "~n   ~s"
-                              "~n",
-                              [Version, DistroStr]),
+                [DistroStr | _] ->
                     case DistroStr of
                         "Wind River Linux" ++ _ ->
-                            wind_river;
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro,
+                                   {wind_river, simplify_label(Label)}});
                         "MontaVista" ++ _ ->
-                            montavista;
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro,
+                                   {montavista, simplify_label(Label)}});
                         "Yellow Dog" ++ _ ->
-                            yellow_dog;
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro,
+                                   {yellow_dog, simplify_label(Label)}});
+                        "Ubuntu" ++ _ ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro,
+                                   {ubuntu, simplify_label(Label)}});
+                        "Linux Mint" ++ _ ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro,
+                                   {linux_mint, simplify_label(Label)}});
                         _ ->
-                            other
+                            DistroStr
                     end;
                 X ->
-                    io:format("Linux: ~s"
-                              "~n   ~p"
-                              "~n",
-                              [Version, X]),
-                    other
+                    X
             end;
         _ ->
-            io:format("Linux: ~s"
-                      "~n", [Version]),
-            other
+            "Unknown"
     end.
-    
+                            
+do_linux_which_distro_fedora(Version, Label) ->
+    %% Check if fedora
+    case file:read_file_info("/etc/fedora-release") of
+        {ok, _} ->
+            case [string:trim(S) ||
+                     S <- string:tokens(os:cmd("cat /etc/fedora-release"),
+                                        [$\n])] of
+                [DistroStr | _] ->
+                    io:format("Linux: ~s"
+                              "~n   Distro:                  ~s"
+                              "~n   TS Extra Platform Label: ~s"
+                              "~n   Product Name:            ~s"
+                              "~n",
+                              [Version, DistroStr, Label,
+                               linux_product_name()]);
+                _ ->
+                    io:format("Linux: ~s"
+                              "~n   Distro:                  ~s"
+                              "~n   TS Extra Platform Label: ~s"
+                              "~n   Product Name:            ~s"
+                              "~n",
+                              [Version, "Fedora", Label,
+                               linux_product_name()])
+            end,
+            throw({distro, {fedora, simplify_label(Label)}});
+        _ ->
+            ignore
+    end.
+
+do_linux_which_distro_suse(Version, Label) ->
+    %% Check if its a SuSE
+    case file:read_file_info("/etc/SUSE-brand") of
+        {ok, _} ->
+            case file:read_file_info("/etc/SuSE-release") of
+                {ok, _} ->
+                    case [string:trim(S) ||
+                             S <- string:tokens(os:cmd("cat /etc/SuSE-release"),
+                                                [$\n])] of
+                        ["SUSE Linux Enterprise Server" ++ _ = DistroStr | _] ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro, {sles, simplify_label(Label)}});
+                        [DistroStr | _] ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, DistroStr, Label,
+                                       linux_product_name()]),
+                            throw({distro, {suse, simplify_label(Label)}});
+                        _ ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, "SuSE", Label,
+                                       linux_product_name()]),
+                            throw({distro, {suse, simplify_label(Label)}})
+                    end;
+                _ ->
+                    case string:tokens(os:cmd("cat /etc/SUSE-brand"), [$\n]) of
+                        ["SLE" = DistroStr, VERSION | _] ->
+                            case [string:strip(S) ||
+                                     S <- string:tokens(VERSION, [$=])] of
+                                ["VERSION", VersionNo] ->
+                                    io:format("Linux: ~s"
+                                              "~n   Distro:                  ~s"
+                                              "~n   Distro Version:          ~s"
+                                              "~n   TS Extra Platform Label: ~s"
+                                              "~n   Product Name:            ~s"
+                                              "~n",
+                                              [Version,
+                                               DistroStr, VersionNo,
+                                               Label,
+                                               linux_product_name()]),
+                                    throw({distro,
+                                           {sles, simplify_label(Label)}});
+                                _ ->
+                                    io:format("Linux: ~s"
+                                              "~n   Distro:                  ~s"
+                                              "~n   TS Extra Platform Label: ~s"
+                                              "~n   Product Name:            ~s"
+                                              "~n",
+                                              [Version, DistroStr, Label,
+                                               linux_product_name()]),
+                                    throw({distro,
+                                           {sles, simplify_label(Label)}})
+                            end;
+                        ["openSUSE" = DistroStr, VERSION | _] ->
+                            case [string:strip(S) ||
+                                     S <- string:tokens(VERSION, [$=])] of
+                                ["VERSION", VersionNo] ->
+                                    io:format("Linux: ~s"
+                                              "~n   Distro:                  ~s"
+                                              "~n   Distro Version:          ~s"
+                                              "~n   TS Extra Platform Label: ~s"
+                                              "~n   Product Name:            ~s"
+                                              "~n",
+                                              [Version,
+                                               DistroStr, VersionNo,
+                                               Label,
+                                               linux_product_name()]),
+                                    throw({distro,
+                                           {suse, simplify_label(Label)}});
+                                _ ->
+                                    io:format("Linux: ~s"
+                                              "~n   Distro:                  ~s"
+                                              "~n   TS Extra Platform Label: ~s"
+                                              "~n   Product Name:            ~s"
+                                              "~n",
+                                              [Version, DistroStr, Label,
+                                               linux_product_name()]),
+                                    throw({distro,
+                                           {suse, simplify_label(Label)}})
+                            end;
+                        _ ->
+                            io:format("Linux: ~s"
+                                      "~n   Distro:                  ~s"
+                                      "~n   TS Extra Platform Label: ~s"
+                                      "~n   Product Name:            ~s"
+                                      "~n",
+                                      [Version, "Unknown SUSE", Label,
+                                       linux_product_name()]),
+                            throw({distro, {suse, simplify_label(Label)}})
+                    end
+            end;
+        _ ->
+            ignore
+    end.
+
+do_linux_which_distro_os_release(Version, Label) ->
+    case file:read_file_info("/etc/os-release") of
+        {ok, _} ->
+            %% We want to 'catch' if our processing is wrong,
+            %% that's why we catch and re-throw the distro.
+            %% Actual errors will be returned as 'ignore'.
+            try
+                begin
+                    Info = linux_process_os_release(),
+                    {value, {_, DistroStr}} = lists:keysearch(name, 1, Info),
+                    {value, {_, VersionNo}} = lists:keysearch(version, 1, Info),
+                    io:format("Linux: ~s"
+                              "~n   Distro:                  ~s"
+                              "~n   Distro Version:          ~s"
+                              "~n   TS Extra Platform Label: ~s"
+                              "~n   Product Name:            ~s"
+                              "~n",
+                              [Version, DistroStr, VersionNo, Label,
+                               linux_product_name()]),
+                    throw({distro,
+                           {linux_distro_str_to_distro_id(DistroStr),
+                            simplify_label(Label)}})
+                end
+            catch
+                throw:{distro, _} = DISTRO ->
+                    throw(DISTRO);
+                _:_ ->
+                    ignore
+            end;
+        _ ->
+            ignore
+    end.
+
+linux_process_os_release() ->
+    %% Read the "raw" file
+    Raw = os:cmd("cat /etc/os-release"),
+    %% Split it into lines
+    Lines1 = string:tokens(Raw, [$\n]),
+    %% Just in case, skip any lines starting with '#'.
+    Lines2 = linux_process_os_release1(Lines1),
+    %% Each (remaining) line *should* be: <TAG>=<VALUE>
+    %% Both sides will be strings, the value side will be a quoted string...
+    %% Convert those into a 2-tuple list: [{Tag, Value}]
+    linux_process_os_release2(Lines2).
+
+linux_process_os_release1(Lines) ->
+    linux_process_os_release1(Lines, []).
+
+linux_process_os_release1([], Acc) ->
+    lists:reverse(Acc);
+linux_process_os_release1([H|T], Acc) ->
+    case H of
+        "#" ++ _ ->
+            linux_process_os_release1(T, Acc);
+        _ ->
+            linux_process_os_release1(T, [H|Acc])
+    end.
+
+linux_process_os_release2(Lines) ->
+    linux_process_os_release2(Lines, []).
+
+linux_process_os_release2([], Acc) ->
+    lists:reverse(Acc);
+linux_process_os_release2([H|T], Acc) ->
+    case linux_process_os_release3(H) of
+        {value, Value} ->
+            linux_process_os_release2(T, [Value|Acc]);
+        false ->
+            linux_process_os_release2(T, Acc)
+    end.
+
+linux_process_os_release3(H) ->
+    case [string:strip(S) || S <- string:tokens(H, [$=])] of
+        [Tag, Value] ->
+            Tag2   = list_to_atom(string:to_lower(Tag)),
+            Value2 = string:strip(Value, both, $"),
+            linux_process_os_release4(Tag2, Value2);
+        _ ->
+            false
+    end.
+
+linux_process_os_release4(name = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(version = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(version_id = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(id = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(pretty_name = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(_Tag, _Value) ->
+    false.
+
+linux_distro_str_to_distro_id("Debian" ++ _) ->
+    debian;
+linux_distro_str_to_distro_id("Fedora" ++ _) ->
+    fedora;
+linux_distro_str_to_distro_id("Linux Mint" ++ _) ->
+    linux_mint;
+linux_distro_str_to_distro_id("MontaVista" ++ _) ->
+    montavista;
+linux_distro_str_to_distro_id("openSUSE" ++ _) ->
+    suse;
+linux_distro_str_to_distro_id("SLES" ++ _) ->
+    sles;
+linux_distro_str_to_distro_id("Ubuntu" ++ _) ->
+    ubuntu;
+linux_distro_str_to_distro_id("Wind River Linux" ++ _) ->
+    wind_river;
+linux_distro_str_to_distro_id("Yellow Dog" ++ _) ->
+    yellow_dog;
+linux_distro_str_to_distro_id(X) ->
+    X.
+
+
 analyze_and_print_linux_host_info(Version) ->
-    Distro =
+    {Distro, Label} =
         case file:read_file_info("/etc/issue") of
             {ok, _} ->
                 linux_which_distro(Version);
             _ ->
+                L = ts_extra_platform_label(),
                 io:format("Linux: ~s"
-                          "~n", [Version]),
-                other
+                          "~n   TS Extra Platform Label: ~s"
+                          "~n", [Version, L]),
+                {other, simplify_label(L)}
         end,
+    %% 'VirtFactor' will be 0 unless virtual
+    VirtFactor = linux_virt_factor(),
     Factor =
         case (catch linux_which_cpuinfo(Distro)) of
             {ok, {CPU, BogoMIPS}} ->
@@ -190,43 +559,112 @@ analyze_and_print_linux_host_info(Version) ->
                           "~n   Num Online Schedulers: ~s"
                           "~n", [CPU, BogoMIPS, str_num_schedulers()]),
                 if
-                    (BogoMIPS > 20000) ->
+                    (BogoMIPS > 50000) ->
                         1;
-                    (BogoMIPS > 10000) ->
+                    (BogoMIPS > 40000) ->
                         2;
-                    (BogoMIPS > 5000) ->
+                    (BogoMIPS > 30000) ->
                         3;
-                    (BogoMIPS > 2000) ->
+                    (BogoMIPS > 20000) ->
+                        4;
+                    (BogoMIPS > 10000) ->
                         5;
-                    (BogoMIPS > 1000) ->
+                    (BogoMIPS > 5000) ->
                         8;
+                    (BogoMIPS > 3000) ->
+                        12;
                     true ->
                         10
+                end;
+            {ok, "POWER9" ++ _ = CPU} ->
+                %% For some reason this host is really slow
+                %% Consider the CPU, it really should not be...
+                %% But, to not fail a bunch of test cases, we add 5
+                case linux_cpuinfo_clock() of
+                    Clock when is_integer(Clock) andalso (Clock > 0) ->
+                        io:format("CPU: "
+                                  "~n   Model:                 ~s"
+                                  "~n   CPU Speed:             ~w"
+                                  "~n   Num Online Schedulers: ~s"
+                                  "~n", [CPU, Clock, str_num_schedulers()]),
+                        if
+                            (Clock > 2000) ->
+                                5 + num_schedulers_to_factor();
+                            true ->
+                                10 + num_schedulers_to_factor()
+                        end;
+                    _ ->
+                        num_schedulers_to_factor()
                 end;
             {ok, CPU} ->
                 io:format("CPU: "
                           "~n   Model:                 ~s"
                           "~n   Num Online Schedulers: ~s"
                           "~n", [CPU, str_num_schedulers()]),
-                NumChed = erlang:system_info(schedulers),
-                if
-                    (NumChed > 2) ->
-                        2;
-                    true ->
-                        5
-                end;
+                num_schedulers_to_factor();
             _ ->
                 5
         end,
+    AddLabelFactor = label2factor(Label),
     %% Check if we need to adjust the factor because of the memory
-    try linux_which_meminfo() of
-        AddFactor ->
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
-            {Factor + AddFactor, []}
-    catch
-        _:_:_ ->
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
-            {Factor, []}
+    AddMemFactor = try linux_which_meminfo()
+                   catch _:_:_ -> 0
+                   end,
+    TSScaleFactor = case timetrap_scale_factor() of
+                        N when is_integer(N) andalso (N > 0) ->
+                            N - 1;
+                        _ ->
+                            0
+                    end,
+    io:format("Factor calc:"
+              "~n      Base Factor:     ~w"
+              "~n      Label Factor:    ~w"
+              "~n      Mem Factor:      ~w"
+              "~n      Virtual Factor:  ~w"
+              "~n      TS Scale Factor: ~w"
+              "~n", [Factor, AddLabelFactor, AddMemFactor, VirtFactor,
+                     TSScaleFactor]),
+    {Factor + AddLabelFactor + AddMemFactor + VirtFactor + TSScaleFactor,
+     [{label, Label}]}.
+
+linux_virt_factor() ->
+    linux_virt_factor(linux_product_name()).
+
+linux_virt_factor("VMware" ++ _) ->
+    2;
+linux_virt_factor("VirtualBox" ++ _) ->
+    4;
+linux_virt_factor(_) ->
+    0.
+
+
+linux_cpuinfo_clock() ->
+    %% This is written as: "3783.000000MHz"
+    %% So, check unit MHz (handle nothing else).
+    %% Also, check for both float and integer
+    %% Also,  the freq is per core, and can vary...
+    case linux_cpuinfo_lookup("clock") of
+        [C|_] when is_list(C) ->
+            case lists:reverse(string:to_lower(C)) of
+                "zhm" ++ CRev ->
+                    try trunc(list_to_float(lists:reverse(CRev))) of
+                        I ->
+                            I
+                    catch
+                        _:_:_ ->
+                            try list_to_integer(lists:reverse(CRev)) of
+                                I ->
+                                    I
+                            catch
+                                _:_:_ ->
+                                    0
+                            end
+                    end;
+                _ ->
+                    0
+            end;
+        _ ->
+            0
     end.
 
 linux_cpuinfo_lookup(Key) when is_list(Key) ->
@@ -236,6 +674,8 @@ linux_cpuinfo_cpu() ->
     case linux_cpuinfo_lookup("cpu") of
         [Model] ->
             Model;
+        ["POWER9" ++ _ = CPU|_] ->
+            CPU;
         _ ->
             "-"
     end.
@@ -250,8 +690,11 @@ linux_cpuinfo_motherboard() ->
 
 linux_cpuinfo_bogomips() ->
     case linux_cpuinfo_lookup("bogomips") of
+	[] ->
+	    "-";
         BMips when is_list(BMips) ->
-            try lists:sum([bogomips_to_int(BM) || BM <- BMips])
+            BMScale = 1.0,
+            try round(BMScale * lists:sum([bogomips_to_int(BM) || BM <- BMips]))
             catch
                 _:_:_ ->
                     "-"
@@ -319,6 +762,14 @@ linux_cpuinfo_processor() ->
             "-"
     end.
 
+linux_cpuinfo_machine() ->
+    case linux_cpuinfo_lookup("machine") of
+        [M] ->
+            M;
+        _ ->
+            "-"
+    end.
+
 linux_which_cpuinfo(montavista) ->
     CPU =
         case linux_cpuinfo_cpu() of
@@ -375,24 +826,43 @@ linux_which_cpuinfo(wind_river) ->
     end;
 
 %% Check for x86 (Intel or AMD)
-linux_which_cpuinfo(other) ->
+linux_which_cpuinfo(Other) when (Other =:= debian) orelse
+                                (Other =:= fedora) orelse
+                                (Other =:= ubuntu) orelse
+                                (Other =:= linux_mint) orelse
+                                (Other =:= sles) orelse
+                                (Other =:= suse) orelse
+                                (Other =:= other) ->
     CPU =
         case linux_cpuinfo_model_name() of
             "-" ->
-                %% ARM (at least some distros...)
-                case linux_cpuinfo_processor() of
-                    "-" ->
-			case linux_cpuinfo_model() of
+		%% This is for POWER9
+		case linux_cpuinfo_cpu() of
+		    "POWER9" ++ _ = PowerCPU ->
+			Machine =
+			    case linux_cpuinfo_machine() of
+				"-" ->
+				    "";
+				M ->
+				    " (" ++ M ++ ")"
+			    end,
+			PowerCPU ++ Machine;
+		    _X ->
+			%% ARM (at least some distros...)
+			case linux_cpuinfo_processor() of
 			    "-" ->
-				%% Ok, we give up
-				throw(noinfo);
-			    Model ->
-				Model
-			end;
-                    Proc ->
-                        Proc
-                end;
-            ModelName ->
+				case linux_cpuinfo_model() of
+				    "-" ->
+					%% Ok, we give up
+					throw(noinfo);
+				    Model ->
+					Model
+				end;
+			    Proc ->
+				Proc
+			end
+		end;
+	    ModelName ->
                 ModelName
         end,
     case linux_cpuinfo_bogomips() of
@@ -453,8 +923,10 @@ linux_which_meminfo() ->
 
 %% Just to be clear: This is ***not*** scientific...
 analyze_and_print_openbsd_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
     io:format("OpenBSD:"
-              "~n   Version: ~p"
+              "~n   Version: ~s"
               "~n", [Version]),
     Extract =
         fun(Key) -> 
@@ -497,55 +969,115 @@ analyze_and_print_openbsd_host_info(Version) ->
                       "~nMemory:"
                       "~n   ~w KB"
                       "~n", [CPU, CPUSpeed, NCPU, Memory]),
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
             CPUFactor =
                 if
-                    (CPUSpeed =:= -1) ->
-                        1;
+                    (CPUSpeed >= 3000) ->
+                        if
+                            (NCPU >= 8) ->
+                                1;
+                            (NCPU >= 6) ->
+                                2;
+                            (NCPU >= 4) ->
+                                3;
+                            (NCPU >= 2) ->
+                                4;
+                            true ->
+                                10
+                        end;
                     (CPUSpeed >= 2000) ->
                         if
-                            (NCPU >= 4) ->
-                                1;
-                            (NCPU >= 2) ->
+                            (NCPU >= 8) ->
                                 2;
+                            (NCPU >= 6) ->
+                                3;
+                            (NCPU >= 4) ->
+                                4;
+                            (NCPU >= 2) ->
+                                5;
                             true ->
-                                3
+                                12
+                        end;
+                    (CPUSpeed >= 1000) ->
+                        if
+                            (NCPU >= 8) ->
+                                3;
+                            (NCPU >= 6) ->
+                                4;
+                            (NCPU >= 4) ->
+                                5;
+                            (NCPU >= 2) ->
+                                6;
+                            true ->
+                                14
                         end;
                     true ->
                         if
+                            (NCPU >= 8) ->
+                                4;
+                            (NCPU >= 6) ->
+                                6;
                             (NCPU >= 4) ->
-                                2;
+                                8;
                             (NCPU >= 2) ->
-                                3;
+                                10;
                             true ->
-                                4
+                                20
                         end
                 end,
             MemAddFactor =
                 if
-                    (Memory =:= -1) ->
+                    (Memory >= 16777216) ->
                         0;
                     (Memory >= 8388608) ->
-                        0;
-                    (Memory >= 4194304) ->
                         1;
+                    (Memory >= 4194304) ->
+                        3;
                     (Memory >= 2097152) ->
-                        2;
+                        5;
                     true ->
-                        3
+                        10
                 end,
-            {CPUFactor + MemAddFactor, []}
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
+            {CPUFactor + MemAddFactor + AddLabelFactor, []}
         end
     catch
         _:_:_ ->
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
-            {2, []}
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
+            {2 + AddLabelFactor, []}
     end.
 
+which_freebsd_version() ->
+    case string:trim(os:cmd("which freebsd-version")) of
+        [] ->
+            "-";
+        FreeBSDVersion ->
+            case string:trim(os:cmd(FreeBSDVersion)) of
+                [] ->
+                    undefined;
+                V ->
+                    V
+            end
+    end.
+    
 analyze_and_print_freebsd_host_info(Version) ->
-    io:format("FreeBSD:"
-              "~n   Version: ~p"
-              "~n", [Version]),
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
+    FreeBSDVersion = which_freebsd_version(),
+    case FreeBSDVersion of
+        undefined ->
+            io:format("FreeBSD:"
+                      "~n   Version: ~s"
+                      "~n", [Version]),
+            "";
+        _ ->
+            io:format("FreeBSD:"
+                      "~n   Version: ~s (~s)"
+                      "~n", [Version, FreeBSDVersion])
+    end,
     %% This test require that the program 'sysctl' is in the path.
     %% First test with 'which sysctl', if that does not work
     %% try with 'which /sbin/sysctl'. If that does not work either,
@@ -582,30 +1114,57 @@ analyze_and_print_freebsd_host_info(Version) ->
                       "~n   ~w KB"
                       "~n",
                       [CPU, CPUSpeed, NCPU, str_num_schedulers(), Memory]),
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
             CPUFactor =
                 if
                     (CPUSpeed =:= -1) ->
                         1;
+                    (CPUSpeed >= 3000) ->
+                        if
+                            (NCPU >= 8) ->
+                                1;
+                            (NCPU >= 6) ->
+                                2;
+                            (NCPU >= 4) ->
+                                3;
+                            (NCPU >= 2) ->
+                                4;
+                            true ->
+                                5
+                        end;
                     (CPUSpeed >= 2000) ->
                         if
-                            (NCPU >= 4) ->
+                            (NCPU >= 12) ->
                                 1;
-                            (NCPU >= 2) ->
+                            (NCPU >= 8) ->
                                 2;
+                            (NCPU >= 6) ->
+                                4;
+                            (NCPU >= 4) ->
+                                6;
+                            (NCPU >= 2) ->
+                                8;
                             true ->
-                                3
+                                10
                         end;
                     true ->
                         if
                             (NCPU =:= -1) ->
-                                1;
-                            (NCPU >= 4) ->
                                 2;
-                            (NCPU >= 2) ->
+                            (NCPU >= 12) ->
+                                2;
+                            (NCPU >= 8) ->
                                 3;
+                            (NCPU >= 6) ->
+                                5;
+                            (NCPU >= 4) ->
+                                7;
+                            (NCPU >= 2) ->
+                                9;
                             true ->
-                                4
+                                12
                         end
                 end,
             MemAddFactor =
@@ -628,16 +1187,10 @@ analyze_and_print_freebsd_host_info(Version) ->
             io:format("CPU:"
                       "~n   Num Online Schedulers: ~s"
                       "~n", [str_num_schedulers()]),
-            io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
-            Factor = case erlang:system_info(schedulers) of
-                         1 ->
-                             10;
-                         2 ->
-                             5;
-                         _ ->
-                             2
-                     end,
-            {Factor, []}
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
+            {num_schedulers_to_factor() ++ AddLabelFactor, []}
     end.
 
 
@@ -678,8 +1231,10 @@ analyze_freebsd_item(Extract, Key, Process, Default) ->
     end.
 
 analyze_and_print_netbsd_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
     io:format("NetBSD:"
-              "~n   Version: ~p"
+              "~n   Version: ~s"
               "~n", [Version]),
     %% This test require that the program 'sysctl' is in the path.
     %% First test with 'which sysctl', if that does not work
@@ -722,6 +1277,9 @@ analyze_and_print_netbsd_host_info(Version) ->
                       "~n",
                       [CPU, Machine, Arch, CPUSpeed, NCPU,
                        erlang:system_info(schedulers), Memory]),
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
             CPUFactor =
                 if
                     (CPUSpeed =:= -1) ->
@@ -760,22 +1318,18 @@ analyze_and_print_netbsd_host_info(Version) ->
                     true ->
                         3
                 end,
-            {CPUFactor + MemAddFactor, []}
+            {CPUFactor + MemAddFactor + AddLabelFactor, []}
         end
     catch
         _:_:_ ->
             io:format("CPU:"
                       "~n   Num Schedulers: ~w"
                       "~n", [erlang:system_info(schedulers)]),
-            Factor = case erlang:system_info(schedulers) of
-                         1 ->
-                             10;
-                         2 ->
-                             5;
-                         _ ->
-                             2
-                     end,
-            {Factor, []}
+            io:format("TS Scale Factor:         ~w~n"
+                      "TS Extra Platform Label: ~s~n",
+                      [timetrap_scale_factor(), Label]),
+            Factor = num_schedulers_to_factor(),
+            {Factor + AddLabelFactor, []}
     end.
 
 analyze_netbsd_cpu(Extract) ->
@@ -812,7 +1366,7 @@ analyze_netbsd_memory(Extract) ->
 analyze_netbsd_item(Extract, Key, Process, Default) ->
     analyze_freebsd_item(Extract, Key, Process, Default).
 
-%% Model Identifier: Macmini7,1
+%%       Model Identifier: Macmini7,1
 %%       Processor Name: Intel Core i5
 %%       Processor Speed: 2,6 GHz
 %%       Number of Processors: 1
@@ -822,53 +1376,83 @@ analyze_netbsd_item(Extract, Key, Process, Default) ->
 %%       Hyper-Threading Technology: Enabled
 %%       Memory: 16 GB
 
+%% Hardware:
+%%
+%%   Hardware Overview:
+%%
+%%    Model Name: MacBook Pro
+%%    Model Identifier: MacBookPro18,1
+%%    Chip: Apple M1 Pro
+%%    Total Number of Cores: 10 (8 performance and 2 efficiency)
+%%    Memory: 32 GB
+%%    System Firmware Version: 7459.101.2
+%%    OS Loader Version: 7459.101.2
+%%    Serial Number (system): THF4W05C97
+%%    Hardware UUID: 7C9AB2E1-73B1-5AD6-9BC8-7229DE7A748C
+%%    Provisioning UDID: 00006000-000259042662801E
+%%    Activation Lock Status: Enabled
+
+
 analyze_and_print_darwin_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
     %% This stuff is for macOS.
     %% If we ever tested on a pure darwin machine,
     %% we need to find some other way to find some info...
     %% Also, I suppose its possible that we for some other
     %% reason *fail* to get the info...
-    case analyze_darwin_software_info() of
-        [] ->
-            io:format("Darwin:"
-                      "~n   Version:               ~s"
-                      "~n   Num Online Schedulers: ~s"
-                      "~n", [Version, str_num_schedulers()]),
-            {num_schedulers_to_factor(), []};
-        SwInfo when  is_list(SwInfo) ->
-            SystemVersion = analyze_darwin_sw_system_version(SwInfo),
-            KernelVersion = analyze_darwin_sw_kernel_version(SwInfo),
-            HwInfo        = analyze_darwin_hardware_info(),
-            ModelName     = analyze_darwin_hw_model_name(HwInfo),
-            ModelId       = analyze_darwin_hw_model_identifier(HwInfo),
-            ProcName      = analyze_darwin_hw_processor_name(HwInfo),
-            ProcSpeed     = analyze_darwin_hw_processor_speed(HwInfo),
-            NumProc       = analyze_darwin_hw_number_of_processors(HwInfo),
-            NumCores      = analyze_darwin_hw_total_number_of_cores(HwInfo),
-            Memory        = analyze_darwin_hw_memory(HwInfo),
-            io:format("Darwin:"
-                      "~n   System Version:        ~s"
-                      "~n   Kernel Version:        ~s"
-                      "~n   Model:                 ~s (~s)"
-                      "~n   Processor:             ~s (~s, ~s, ~s)"
-                      "~n   Memory:                ~s"
-                      "~n   Num Online Schedulers: ~s"
-                      "~n", [SystemVersion, KernelVersion,
-                             ModelName, ModelId,
-                             ProcName, ProcSpeed, NumProc, NumCores, 
-                             Memory,
-                             str_num_schedulers()]),
-            CPUFactor = analyze_darwin_cpu_to_factor(ProcName,
-                                                     ProcSpeed,
-                                                     NumProc,
-                                                     NumCores),
-            MemFactor = analyze_darwin_memory_to_factor(Memory),
-            if (MemFactor =:= 1) ->
-                    {CPUFactor, []};
-               true ->
-                    {CPUFactor + MemFactor, []}
-            end
-    end.
+    Label  = ts_extra_platform_label(),
+    {BaseFactor, MemFactor} =
+        case analyze_darwin_software_info() of
+            [] ->
+                io:format("Darwin:"
+                          "~n   Version:               ~s"
+                          "~n   Num Online Schedulers: ~s"
+                          "~n   TS Extra Platform Label: ~s"
+                          "~n", [Version, str_num_schedulers(), Label]),
+                {num_schedulers_to_factor(), 1};
+            SwInfo when is_list(SwInfo) ->
+                SystemVersion = analyze_darwin_sw_system_version(SwInfo),
+                KernelVersion = analyze_darwin_sw_kernel_version(SwInfo),
+                HwInfo        = analyze_darwin_hardware_info(),
+                ModelName     = analyze_darwin_hw_model_name(HwInfo),
+                ModelId       = analyze_darwin_hw_model_identifier(HwInfo),
+                {Processor, CPUFactor} = analyze_darwin_hw_processor(HwInfo),
+                Memory        = analyze_darwin_hw_memory(HwInfo),
+                Memory        = analyze_darwin_hw_memory(HwInfo),
+                io:format("Darwin:"
+                          "~n   System Version:          ~s"
+                          "~n   Kernel Version:          ~s"
+                          "~n   Model:                   ~s (~s)"
+                          "~n   Processor:               ~s"
+                          "~n   Memory:                  ~s"
+                          "~n   Num Online Schedulers:   ~s"
+                          "~n   TS Extra Platform Label: ~s"
+                          "~n~n",
+                          [SystemVersion, KernelVersion,
+                           ModelName, ModelId,
+                           Processor, 
+                           Memory,
+                           str_num_schedulers(), Label]),
+                {CPUFactor, analyze_darwin_memory_to_factor(Memory)}
+        end,
+    AddLabelFactor = label2factor(simplify_label(Label)),
+    AddMemFactor = if
+                       (MemFactor > 0) ->
+                           MemFactor - 1;
+                       true ->
+                           0
+                   end,
+    TSScaleFactor = ts_scale_factor(),
+    io:format("Factor calc:"
+              "~n      Base Factor:     ~w"
+              "~n      Label Factor:    ~w"
+              "~n      Mem Factor:      ~w"
+              "~n      TS Scale Factor: ~w"
+              "~n~n",
+              [BaseFactor, AddLabelFactor, AddMemFactor, TSScaleFactor]),
+    {BaseFactor + AddLabelFactor + AddMemFactor + TSScaleFactor,
+     [{label, Label}]}.
 
 analyze_darwin_sw_system_version(SwInfo) ->
     proplists:get_value("system version", SwInfo, "-").
@@ -879,11 +1463,37 @@ analyze_darwin_sw_kernel_version(SwInfo) ->
 analyze_darwin_software_info() ->
     analyze_darwin_system_profiler("SPSoftwareDataType").
 
+analyze_darwin_hw_chip(HwInfo) ->
+    proplists:get_value("chip", HwInfo, "-").
+
 analyze_darwin_hw_model_name(HwInfo) ->
     proplists:get_value("model name", HwInfo, "-").
 
 analyze_darwin_hw_model_identifier(HwInfo) ->
     proplists:get_value("model identifier", HwInfo, "-").
+
+analyze_darwin_hw_processor(HwInfo) ->
+    case analyze_darwin_hw_processor_name(HwInfo) of
+        "-" -> % Maybe Apple Chip
+            case analyze_darwin_hw_chip(HwInfo) of
+                "-" ->
+                    "-";
+                Chip ->
+                    NumCores = analyze_darwin_hw_total_number_of_cores(HwInfo),
+                    CPUFactor = analyze_darwin_cpu_to_factor(Chip, NumCores),
+                    {f("~s [~s]", [Chip, NumCores]), CPUFactor}
+            end;
+        ProcName ->
+            ProcSpeed = analyze_darwin_hw_processor_speed(HwInfo),
+            NumProc   = analyze_darwin_hw_number_of_processors(HwInfo),
+            NumCores  = analyze_darwin_hw_total_number_of_cores(HwInfo),
+            CPUFactor = analyze_darwin_cpu_to_factor(ProcName,
+                                                     ProcSpeed,
+                                                     NumProc,
+                                                     NumCores),
+            {f("~s [~s, ~s, ~s]",
+               [ProcName, ProcSpeed, NumProc, NumCores]), CPUFactor}
+    end.
 
 analyze_darwin_hw_processor_name(HwInfo) ->
     proplists:get_value("processor name", HwInfo, "-").
@@ -908,17 +1518,28 @@ analyze_darwin_hardware_info() ->
 %%    "Something:" (which we ignore)
 %%    "Key: Value1:Value2"
 analyze_darwin_system_profiler(DataType) ->
-    %% First, make sure the program actually exist:
-    case os:cmd("which system_profiler") of
+    %% First, make sure the program actually exist (with the current PATH):
+    Prog0 = "system_profiler",
+    case os:cmd("which " ++ Prog0) of
         [] ->
-            [];
+            %% Ok, as a last resource, check if is /usr/sbin/system_profiler?
+            Prog1 = "/usr/sbin/system_profiler",
+            case os:cmd("which " ++ Prog1) of
+                [] ->
+                    [];
+                _ ->
+                    analyze_darwin_system_profiler(Prog1, DataType)
+            end;
         _ ->
-            D0 = os:cmd("system_profiler " ++ DataType),
-            D1 = string:tokens(D0, [$\n]),
-            D2 = [string:trim(S1) || S1 <- D1],
-            D3 = [string:tokens(S2, [$:]) || S2 <- D2],
-            analyze_darwin_system_profiler2(D3)
+            analyze_darwin_system_profiler(Prog0, DataType)
     end.
+
+analyze_darwin_system_profiler(Prog, DataType) ->
+    D0 = os:cmd(Prog ++ " " ++ DataType),
+    D1 = string:tokens(D0, [$\n]),
+    D2 = [string:trim(S1) || S1 <- D1],
+    D3 = [string:tokens(S2, [$:]) || S2 <- D2],
+    analyze_darwin_system_profiler2(D3).
 
 analyze_darwin_system_profiler2(L) ->
     analyze_darwin_system_profiler2(L, []).
@@ -967,10 +1588,16 @@ analyze_darwin_memory_to_factor(Mem) ->
             20
     end.
 
-%% The speed is a string: "<speed> <unit>"
+%% This is for the M1 family of chips
+%% We don't actually know *how* fast it is, only that its fast.
 %% the speed may be a float, which we transforms into an integer of MHz.
-%% To calculate a factor based on processor speed, number of procs
-%% and number of cores is ... not an exact ... science ...
+%% To calculate a factor based on processor "class" and number of cores
+%% is ... not an exact ... science ...
+analyze_darwin_cpu_to_factor("Apple M" ++ _ = _Chip, _NumCoresStr) ->
+    %% We know that pretty much every M processor is *fast*,
+    %% so there is no real need to "calculate" anything...
+    1.
+
 analyze_darwin_cpu_to_factor(_ProcName,
                              ProcSpeedStr, NumProcStr, NumCoresStr) ->
     Speed = 
@@ -1093,6 +1720,9 @@ analyze_darwin_cpu_to_factor(_ProcName,
     end.
 
 analyze_and_print_solaris_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
+
     Release =
         case file:read_file_info("/etc/release") of
             {ok, _} ->
@@ -1122,9 +1752,9 @@ analyze_and_print_solaris_host_info(Version) ->
             IS ->
                 IS
         end,
-    PtrConf = [list_to_tuple([string:trim(S) || S <- Items]) || Items <- [string:tokens(S, [$:]) || S <- string:tokens(os:cmd("prtconf"), [$\n])], length(Items) > 1],
+    PrtConf = [list_to_tuple([string:trim(S) || S <- Items]) || Items <- [string:tokens(S, [$:]) || S <- string:tokens(os:cmd("prtconf"), [$\n])], length(Items) > 1],
     SysConf =
-        case lists:keysearch("System Configuration", 1, PtrConf) of
+        case lists:keysearch("System Configuration", 1, PrtConf) of
             {value, {_, SC}} ->
                 SC;
             _ ->
@@ -1162,7 +1792,7 @@ analyze_and_print_solaris_host_info(Version) ->
                 "-"
         end,
     MemSz =
-        case lists:keysearch("Memory size", 1, PtrConf) of
+        case lists:keysearch("Memory size", 1, PrtConf) of
             {value, {_, MS}} ->
                 MS;
             _ ->
@@ -1180,33 +1810,36 @@ analyze_and_print_solaris_host_info(Version) ->
                        NumPhysCPU, NumVCPU,
                        SysConf, MemSz,
                        str_num_schedulers()]),
-    io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
-    MemFactor =
+    AddMemFactor =
         try string:tokens(MemSz, [$ ]) of
             [SzStr, "Mega" ++ _] ->
                 try list_to_integer(SzStr) of
-                    Sz when Sz > 8192 ->
+                    Sz when Sz > 16384 ->
                         0;
-                    Sz when Sz > 4096 ->
+                    Sz when Sz > 8192 ->
                         1;
+                    Sz when Sz > 4096 ->
+                        4;
                     Sz when Sz > 2048 ->
-                        2;
+                        8;
                     _ -> 
-                        5
+                        12
                 catch
                     _:_:_ ->
                         10
                 end;
             [SzStr, "Giga" ++ _] ->
                 try list_to_integer(SzStr) of
-                    Sz when Sz > 8 ->
+                    Sz when Sz > 16 ->
                         0;
-                    Sz when Sz > 4 ->
+                    Sz when Sz > 8 ->
                         1;
+                    Sz when Sz > 4 ->
+                        4;
                     Sz when Sz > 2 ->
-                        2;
+                        8;
                     _ -> 
-                        5
+                        12
                 catch
                     _:_:_ ->
                         10
@@ -1217,79 +1850,145 @@ analyze_and_print_solaris_host_info(Version) ->
             _:_:_ ->
                 10
         end,
-    {try erlang:system_info(schedulers) of
-         1 ->
-             10;
-         2 ->
-             5;
-         N when (N =< 6) ->
-             2;
-         _ ->
-             1
-     catch
-         _:_:_ ->
-             10
-     end + MemFactor, []}.    
+    %% We don't really have enough info about the CPU to calculate the
+    %% base factor based on that, so we just use the number of schedulers.
+    BaseFactor =
+        try erlang:system_info(schedulers) of
+            1 ->
+                12;
+            2 ->
+                8;
+            N when (N =:= 3) orelse (N =:= 4) ->
+	        4;
+            N when (N =< 6) ->
+                3;
+            _ ->
+                2
+        catch
+            _:_:_ ->
+               12
+        end,
+    TSScaleFactor = ts_scale_factor(),
+    io:format("Factor calc:"
+              "~n      Base Factor:             ~w"
+              "~n      Label Factor:            ~w"
+              "~n      Mem Factor:              ~w"
+              "~n      TS Scale Factor:         ~w"
+              "~n      TS Extra Platform Label: ~s"
+              "~n~n",
+              [BaseFactor, AddLabelFactor, AddMemFactor,
+	       TSScaleFactor, Label]),
+    {BaseFactor + AddMemFactor + AddLabelFactor + TSScaleFactor,
+     [{label, Label}]}.    
 
 analyze_and_print_win_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
+
     SysInfo    = which_win_system_info(),
     OsName     = win_sys_info_lookup(os_name,             SysInfo),
     OsVersion  = win_sys_info_lookup(os_version,          SysInfo),
     SysMan     = win_sys_info_lookup(system_manufacturer, SysInfo),
     SysMod     = win_sys_info_lookup(system_model,        SysInfo),
+    SysType    = win_sys_info_lookup(system_type,         SysInfo),
     NumProcs   = win_sys_info_lookup(num_processors,      SysInfo),
     TotPhysMem = win_sys_info_lookup(total_phys_memory,   SysInfo),
     io:format("Windows: ~s"
               "~n   OS Version:             ~s (~p)"
               "~n   System Manufacturer:    ~s"
               "~n   System Model:           ~s"
+              "~n   System Type:            ~s"
               "~n   Number of Processor(s): ~s"
               "~n   Total Physical Memory:  ~s"
+              "~n   (Erlang) WordSize:      ~w"
               "~n   Num Online Schedulers:  ~s"
               "~n~n", [OsName, OsVersion, Version,
-                       SysMan, SysMod, NumProcs, TotPhysMem,
+                       SysMan, SysMod, SysType,
+                       NumProcs, TotPhysMem,
+                       erlang:system_info(wordsize),
                        str_num_schedulers()]),
-    io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
+    io:format("TS: "
+              "~n   TimeTrap Factor:      ~w"
+              "~n   Extra Platform Label: ~s"
+              "~n~n",
+              [timetrap_scale_factor(), Label]),
+    %% 'VirtFactor' will be 0 unless virtual
+    VirtFactor = win_virt_factor(SysMod),
+
+    %% On some machines this is a badly formated string
+    %% (contains a char of 255), so we need to do some nasty stuff...
     MemFactor =
         try
             begin
-                [MStr, MUnit|_] =
-                    string:tokens(lists:delete($,, TotPhysMem), [$\ ]),
+                %% "Normally" this looks like this: "16,123 MB"
+                %% But sometimes the "," is replaced by a
+		%% 255 or 160 char, which I assume must be some
+		%% unicode screwup...
+                %% Anyway, filter out both of them!
+                TotPhysMem1 = lists:delete($,, TotPhysMem),
+                TotPhysMem2 = lists:delete(255, TotPhysMem1),
+                TotPhysMem3 = lists:delete(160, TotPhysMem2),
+                [MStr, MUnit|_] = string:tokens(TotPhysMem3, [$\ ]),
                 case string:to_lower(MUnit) of
                     "gb" ->
                         try list_to_integer(MStr) of
-                            M when M > 8 ->
+                            M when M >= 16 ->
                                 0;
-                            M when M > 4 ->
+                            M when M >= 8 ->
                                 1;
-                            M when M > 2 ->
-                                2;
+                            M when M >= 4 ->
+                                3;
+                            M when M >= 2 ->
+                                6;
                             _ -> 
-                                5
+                                10
                         catch
                             _:_:_ ->
+                                %% For some reason the string contains
+                                %% "unusual" characters...
+                                %% ...so print the string as a list...
+                                io:format("Bad memory string: "
+                                          "~n   [gb] ~w"
+                                          "~n", [MStr]),
                                 10
                         end;
                     "mb" ->
                         try list_to_integer(MStr) of
-                            M when M > 8192 ->
+                            M when M >= 16384 ->
                                 0;
-                            M when M > 4096 ->
+                            M when M >= 8192 ->
                                 1;
-                            M when M > 2048 ->
-                                2;
+                            M when M >= 4096 ->
+                                3;
+                            M when M >= 2048 ->
+                                6;
                             _ -> 
-                                5
+                                10
                         catch
                             _:_:_ ->
+                                %% For some reason the string contains
+                                %% "unusual" characters...
+                                %% ...so print the string as a list...
+                                io:format("Bad memory string: "
+                                          "~n   [mb] ~w"
+                                          "~n", [MStr]),
                                 10
                         end;
                     _ ->
+                        io:format("Bad memory string: "
+                                  "~n   ~w"
+                                  "~n", [MStr]),
                         10
                 end
             end
         catch
             _:_:_ ->
+                %% For some reason the string contains
+                %% "unusual" characters...
+                %% ...so print the string as a list...
+                io:format("Bad memory string: "
+                          "~n   (y) ~w"
+                          "~n", [TotPhysMem]),
                 10
         end,
     CPUFactor = 
@@ -1301,7 +2000,20 @@ analyze_and_print_win_host_info(Version) ->
             _ ->
                 2
         end,
-    {CPUFactor + MemFactor, SysInfo}.
+    io:format("Factor calc:"
+              "~n      CPU Factor:     ~w"
+              "~n      Mem Factor:     ~w"
+              "~n      Label Factor:   ~w"
+              "~n      Virtual Factor: ~w"
+              "~n~n",
+              [CPUFactor, MemFactor, AddLabelFactor, VirtFactor]),
+    {CPUFactor + MemFactor + AddLabelFactor + VirtFactor, SysInfo}.
+
+win_virt_factor("VMware" ++ _) ->
+    2;
+win_virt_factor(_) ->
+    0.
+
 
 win_sys_info_lookup(Key, SysInfo) ->
     win_sys_info_lookup(Key, SysInfo, "-").
@@ -1353,6 +2065,9 @@ process_win_system_info([H|T], Acc) ->
                 "system model" ->
                     process_win_system_info(T,
                                             [{system_model, string:trim(Value)}|Acc]);
+                "system type" ->
+                    process_win_system_info(T,
+                                            [{system_type, string:trim(Value)}|Acc]);
                 "processor(s)" ->
                     [NumProcStr|_] = string:tokens(Value, [$\ ]),
                     T2 = lists:nthtail(list_to_integer(NumProcStr), T),
@@ -1380,8 +2095,12 @@ num_schedulers_to_factor() ->
         1 ->
             10;
         2 ->
-            5;
-        N when (N =< 6) ->
+            8;
+        3 ->
+            6;
+        4 ->
+            4;
+        N when (N =< 5) ->
             2;
         _ ->
             1
@@ -1390,6 +2109,43 @@ num_schedulers_to_factor() ->
             10
     end.
 
+
+ts_extra_platform_label() ->
+    case os:getenv("TS_EXTRA_PLATFORM_LABEL") of
+        false -> "-";
+        Val   -> Val
+    end.
+
+ts_scale_factor() ->
+    case timetrap_scale_factor() of
+        N when is_integer(N) andalso (N > 0) ->
+            N - 1;
+        _ ->
+            0
+    end.
+
+simplify_label("Systemtap" ++ _) ->
+    {host, systemtap};
+simplify_label("Meamax" ++ _) ->
+    {host, meamax};
+simplify_label("Cover" ++ _) ->
+    {host, cover};
+simplify_label(Label) ->
+    case string:find(string:to_lower(Label), "docker") of
+        "docker" ++ _ ->
+            docker;
+        _ ->
+            {host, undefined}
+    end.
+
+label2factor(docker) ->
+    4;
+label2factor({host, meamax}) ->
+    2;
+label2factor({host, cover}) ->
+    6;
+label2factor({host, _}) ->
+    0.
 
 linux_info_lookup(Key, File) ->
     LKey = string:to_lower(Key),
@@ -1414,6 +2170,22 @@ linux_info_lookup_collect(Key1, [Key2, Value|Rest], Values) ->
     end;
 linux_info_lookup_collect(_, _, Values) ->
     lists:reverse(Values).
+
+
+linux_product_name() ->
+    ProductNameFile = "/sys/devices/virtual/dmi/id/product_name",
+    case file:read_file_info(ProductNameFile) of
+        {ok, _} ->
+            case os:cmd("cat " ++ ProductNameFile) of
+                false ->
+                    "-";
+                Info ->
+                    string:trim(Info)
+            end;
+        _ ->
+            "-"
+    end.
+
 
 maybe_skip(_HostInfo) ->
 
@@ -1609,68 +2381,149 @@ tc_end(Result) when is_list(Result) ->
              "", "----------------------------------------------------~n~n"),
     ok.
 
-%% *** tc_try/2,3 ***
-%% Case: Basically the test case name
-%% Cond: A fun that is evaluated before the actual test case
-%%       The point of this is that it can performs checks to
-%%       see if we shall run the test case at all.
-%%       For instance, the test case may only work in specific
-%%       conditions.
-%% TC:   The test case fun
-tc_try(Case, Cond, TC) 
+
+%% *** tc_try/2,3,4,5 ***
+%% Case:   Basically the test case name
+%% TCCond: A fun that is evaluated before the actual test case
+%%         The point of this is that it can performs checks to
+%%         see if we shall run the test case at all.
+%%         For instance, the test case may only work in specific
+%%         conditions.
+%% Pre:    A fun that is nominally part of the test case
+%%         but is an initiation that must be "undone". This is
+%%         done by the Post fun (regardless if the TC is successfull
+%%         or not). Example: Starts a couple of nodes,
+%% TC:     The test case fun
+%% Post:   A fun that undo what was done by the Pre fun.
+%%         Example: Stops the nodes created by the Pre function.
+tc_try(Case, TC) ->
+    tc_try(Case, fun() -> ok end, TC).
+
+tc_try(Case, TCCond, TC0) when is_function(TC0, 0) ->
+    Pre  = fun()  -> undefined end,
+    TC   = fun(_) -> TC0() end,
+    Post = fun(_) -> ok end,
+    tc_try(Case, TCCond, Pre, TC, Post).
+
+tc_try(Case, Pre, TC, Post)
   when is_atom(Case) andalso
-       is_function(Cond, 0) andalso
-       is_function(TC, 0) ->
+       is_function(Pre, 0) andalso
+       is_function(TC, 1) andalso
+       is_function(Post, 1) ->
+    TCCond = fun() -> ok end,
+    tc_try(Case, TCCond, Pre, TC, Post).
+
+tc_try(Case, TCCond, Pre, TC, Post)
+  when is_atom(Case) andalso
+       is_function(TCCond, 0) andalso
+       is_function(Pre, 0) andalso
+       is_function(TC, 1) andalso
+       is_function(Post, 1) ->
     tc_begin(Case),
-    try Cond() of
+    try TCCond() of
         ok ->
-            try 
-                begin
-                    TC(),
-                    ?SLEEP(?SECS(1)),
-                    tc_end("ok")
-                end
+            tc_print("starting: try pre"),
+            try Pre() of
+                State ->
+                    tc_print("pre done: try test case"),
+                    try
+                        begin
+                            TCRes = TC(State),
+                            ?SLEEP(?SECS(1)),
+                            tc_print("test case done: try post"),
+                            (catch Post(State)),
+                            tc_end("ok"),
+                            TCRes
+                        end
+                    catch
+                        C:{skip, _} = SKIP when (C =:= throw) orelse
+                                                (C =:= exit) ->
+                            tc_print("test case (~w) skip: try post", [C]),
+                            (catch Post(State)),
+                            tc_end( f("skipping(catched,~w,tc)", [C]) ),
+                            SKIP;
+                        C:E:S ->
+                            %% We always check the system events
+                            %% before we accept a failure.
+                            %% We do *not* run the Post here because it might
+                            %% generate sys events itself...wait until after
+                            %% events has been checked.
+                            case kernel_test_global_sys_monitor:events() of
+                                [] ->
+                                    tc_print("test case failed: try post"),
+                                    (catch Post(State)),
+                                    tc_end( f("failed(caught,~w,tc)", [C]) ),
+                                    erlang:raise(C, E, S);
+                                SysEvs ->
+                                    tc_print(
+                                      "System Events received during tc: "
+                                      "~n   ~p"
+                                      "~nwhen tc failed:"
+                                      "~n   C: ~p"
+                                      "~n   E: ~p"
+                                      "~n   S: ~p",
+                                      [SysEvs, C, E, S]),
+                                    (catch Post(State)),
+                                    tc_end( f("skipping(catched-sysevs,~w,tc)",
+                                              [C]) ),
+                                    SKIP = {skip,
+                                            "TC failure with system events"},
+                                    SKIP
+                            end
+                    end
             catch
-                C:{skip, _} = SKIP when ((C =:= throw) orelse (C =:= exit)) ->
-                    %% i("caught[tc] (skip): "
-                    %%   "~n   C:    ~p"
-                    %%   "~n   SKIP: ~p"
-                    %%   "~n", [C, SKIP]),
-                    tc_end( f("skipping(caught,~w,tc)", [C]) ),
+                C:{skip, _} = SKIP when (C =:= throw) orelse
+                                        (C =:= exit) ->
+                    tc_end( f("skipping(catched,~w,tc-pre)", [C]) ),
                     SKIP;
                 C:E:S ->
-                    %% i("caught[tc]: "
-                    %%   "~n   C: ~p"
-                    %%   "~n   E: ~p"
-                    %%   "~n   S: ~p"
-                    %%    "~n", [C, E, S]),
-                    tc_end( f("failed(caught,~w,tc)", [C]) ),
-                    erlang:raise(C, E, S)
+                    %% We always check the system events
+                    %% before we accept a failure
+                    case kernel_test_global_sys_monitor:events() of
+                        [] ->
+                            tc_print("tc-pre failed: auto-skip"
+                                     "~n   C: ~p"
+                                     "~n   E: ~p"
+                                     "~n   S: ~p",
+                                     [C, E, S]),
+                            tc_end( f("auto-skip(caught,~w,tc-pre)", [C]) ),
+                            SKIP = {skip, f("TC-Pre failure (~w)", [C])},
+                            SKIP;
+                        SysEvs ->
+                            tc_print("System Events received: "
+                                     "~n   ~p"
+                                     "~nwhen tc-pre failed:"
+                                     "~n   C: ~p"
+                                     "~n   E: ~p"
+                                     "~n   S: ~p",
+                                     [SysEvs, C, E, S], "", ""),
+                            tc_end( f("skipping(catched-sysevs,~w,tc-pre)",
+                                      [C]) ),
+                            SKIP = {skip, "TC-Pre failure with system events"},
+                            SKIP
+                    end
             end;
         {skip, _} = SKIP ->
-            tc_end("skipping(tc)"),
+            tc_end("skipping(cond)"),
             SKIP;
         {error, Reason} ->
-            tc_end("failed(tc)"),
+            tc_end("failed(cond)"),
             exit({tc_cond_failed, Reason})
     catch
         C:{skip, _} = SKIP when ((C =:= throw) orelse (C =:= exit)) ->
-            %% i("caught[cond] (skip): "
-            %%   "~n   C:    ~p"
-            %%   "~n   SKIP: ~p"
-            %%   "~n", [C, SKIP]),
-            tc_end( f("skipping(caught,~w,cond)", [C]) ),
+            tc_end( f("skipping(catched,~w,cond)", [C]) ),
             SKIP;
         C:E:S ->
-            %% i("caught[cond]: "
-            %%   "~n   C: ~p"
-            %%   "~n   E: ~p"
-            %%   "~n   S: ~p"
-            %%   "~n", [C, E, S]),
-            tc_end( f("failed(caught,~w,cond)", [C]) ),
+            tc_end( f("failed(catched,~w,cond)", [C]) ),
             erlang:raise(C, E, S)
     end.
 
+
+tc_print(F) ->
+    tc_print(F, [], "", "").
+
+tc_print(F, A) ->
+    tc_print(F, A, "", "").
 
 tc_print(F, Before, After) ->
     tc_print(F, [], Before, After).
@@ -1697,23 +2550,16 @@ tc_which_name() ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-start_slave_node(Name, Args) ->
-    start_slave_node(Name, Args, []).
+start_node(Name, Args) ->
+    start_node(Name, Args, []).
 
-start_slave_node(Name, Args, Opts) ->
-    start_node(Name, slave, Args, Opts).
-
-
-start_node(Name, Type, Args) ->
-    start_node(Name, Type, Args, []).
-
-start_node(Name, Type, Args, Opts) ->
+start_node(Name, Args, Opts) ->
     Pa = filename:dirname(code:which(?MODULE)),
     A = Args ++
         " -pa " ++ Pa ++ 
         " -s " ++ atom_to_list(kernel_test_sys_monitor) ++ " start" ++ 
         " -s global sync",
-    case test_server:start_node(Name, Type, [{args, A}|Opts]) of
+    case test_server:start_node(Name, peer, [{args, A}|Opts]) of
         {ok, _Node} = OK ->
             global:sync(),
 	    OK;
@@ -1736,20 +2582,27 @@ timetrap_scale_factor() ->
     end.
 
 
-proxy_call(F, Timeout, Default)
-  when is_function(F, 0) andalso is_integer(Timeout) andalso (Timeout > 0) ->
-    {P, M} = erlang:spawn_monitor(fun() -> exit(F()) end),
-    receive
-        {'DOWN', M, process, P, Reply} ->
-            Reply
-    after Timeout ->
-            erlang:demonitor(M, [flush]),
-            exit(P, kill),
-            Default
-    end.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+os_cmd(Cmd) ->
+    os_cmd(Cmd, infinity).
+
+os_cmd(Cmd, infinity) ->
+    {ok, os:cmd(Cmd)};
+os_cmd(Cmd, Timeout) when is_integer(Timeout) andalso (Timeout > 0) ->
+    proxy_call(fun() -> {ok, os:cmd(Cmd)} end, Timeout, {error, timeout}).
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+mq() ->
+    mq(self()).
+
+mq(Pid) when is_pid(Pid) ->
+    {messages, MQ} = process_info(Pid, messages),
+    MQ.
+
+             
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 socket_type(Config) ->
@@ -1783,16 +2636,16 @@ open(Config, Port, Opts) ->
 
 
 inet_backend_opts(Config) when is_list(Config) ->
-    case lists:keysearch(socket_create_opts, 1, Config) of
-        {value, {socket_create_opts, InetBackendOpts}} ->
+    case lists:keyfind(socket_create_opts, 1, Config) of
+        {_, InetBackendOpts} ->
             InetBackendOpts;
         false ->
             []
     end.
 
 is_socket_backend(Config) when is_list(Config) ->
-    case lists:keysearch(socket_create_opts, 1, Config) of
-        {value, {socket_create_opts, [{inet_backend, socket}]}} ->
+    case lists:keyfind(socket_create_opts, 1, Config) of
+        {_, [{inet_backend, socket}]} ->
             true;
         _ ->
             false
@@ -1802,8 +2655,8 @@ is_socket_backend(Config) when is_list(Config) ->
 explicit_inet_backend() ->
     case application:get_all_env(kernel) of
         Env when is_list(Env) ->
-            case lists:keysearch(inet_backend, 1, Env) of
-                {value, {inet_backend, _}} ->
+            case lists:keyfind(inet_backend, 1, Env) of
+                {_, _} ->
                     true;
                 _ ->
                     false
@@ -1816,8 +2669,8 @@ explicit_inet_backend() ->
 test_inet_backends() ->
     case application:get_all_env(kernel) of
         Env when is_list(Env) ->
-            case lists:keysearch(test_inet_backends, 1, Env) of
-                {value, {test_inet_backends, true}} ->
+            case lists:keyfind(test_inet_backends, 1, Env) of
+                {_, true} ->
                     true;
                 _ ->
                     false
@@ -1826,8 +2679,57 @@ test_inet_backends() ->
             false 
     end.
 
+which_inet_backend(Config) ->
+    case lists:keyfind(socket_create_opts, 1, Config) of
+        {_, [{inet_backend, Backend}]} ->
+            Backend;
+        _ ->
+            default
+    end.
+
+config_inet_backend(Config, Backend) ->
+    if
+        Backend =:= default ->
+            [];
+        Backend =:= socket;
+        Backend =:= inet ->
+            [{socket_create_opts, [{inet_backend, Backend}]}]
+    end ++ lists:keydelete(socket_create_opts, 1, Config).
+
+
+proxy_call(F, Timeout, Default)
+  when is_function(F, 0) andalso is_integer(Timeout) andalso (Timeout > 0) ->
+    {P, M} = erlang:spawn_monitor(fun() -> exit(F()) end),
+    receive
+        {'DOWN', M, process, P, Reply} ->
+            Reply
+    after Timeout ->
+            erlang:demonitor(M, [flush]),
+            exit(P, kill),
+            Default
+    end.
+
+
+
+ensure_not_dog_slow(Config, Limit) ->
+    Key = kernel_factor,
+    case lists:keysearch(Key, 1, Config) of
+        {value, {Key, Value}} when (Value > Limit) ->
+            skip({factor_limit, Value, Limit});
+        _ ->
+            ok
+    end.
+            
 
 %% This is an extremely simple check...
+has_support_ipv4() ->
+    case which_local_addr(inet) of
+        {ok, _Addr} ->
+            ok;
+        {error, _R1} ->
+            skip("IPv4 Not Supported")
+    end.
+
 has_support_ipv6() ->
     case which_local_addr(inet6) of
         {ok, _Addr} ->
@@ -1836,15 +2738,29 @@ has_support_ipv6() ->
             skip("IPv6 Not Supported")
     end.
 
+is_socket_supported() ->
+    try socket:info() of
+        #{} ->
+            true
+    catch
+        error : notsup ->
+            false;
+        error : undef ->
+            false
+    end.
 
+has_support_unix_domain_socket() ->
+    socket:is_supported(local).
 
 %% This gets the local "proper" address
 %% (not {127, ...} or {169,254, ...} or {0, ...} or {16#fe80, ...})
-%% We should really implement this using the (new) net module,
+%% We should really implement this using the ("new") net module,
 %% but until that gets the necessary functionality...
 which_local_addr(Domain) ->
+    %% put(debug, true),
     case which_local_host_info(false, Domain) of
         {ok, [#{addr := Addr}|_]} ->
+            %% put(debug, false),
             {ok, Addr};
         {error, _Reason} = ERROR ->
             ERROR
@@ -1870,10 +2786,28 @@ which_local_host_info(Domain) ->
 
 
 which_local_host_info(LinkLocal, Domain)
-  when is_boolean(LinkLocal) andalso ((Domain =:= inet) orelse (Domain =:= inet6)) ->
-    case inet:getifaddrs() of
+  when is_boolean(LinkLocal) andalso
+       ((Domain =:= inet) orelse (Domain =:= inet6)) ->
+    %% Prioritize net (if supported)
+    case is_socket_supported() of
+        true ->  % Use net
+            net_which_local_host_info(LinkLocal, Domain);
+        false -> % Use inet
+            inet_which_local_host_info(LinkLocal, Domain)
+    end.
+
+
+%% -- net
+
+net_which_local_host_info(LinkLocal, Domain) ->
+    ?DBG("~w -> entry with"
+         "~n   LinkLocal: ~p"
+         "~n   Domain:    ~p", [?FUNCTION_NAME, LinkLocal, Domain]),
+    case net_getifaddrs(LinkLocal, Domain) of
         {ok, IFL} ->
-            which_local_host_info(LinkLocal, Domain, IFL, []);
+            ?DBG("~w -> "
+                 "~n   IFL: ~p", [?FUNCTION_NAME, IFL]),
+            net_which_local_host_info2(IFL, []);
         {error, _} = ERROR ->
             ERROR
     end.
@@ -1894,52 +2828,206 @@ which_local_host_info(LinkLocal, Domain)
 %%   anpi0
 %%.  vmenet0
 %% On Mac, List hw: networksetup -listallhardwareports
-which_local_host_info(_LinkLocal, _Domain, [], []) ->
+net_which_local_host_info2([], []) ->
     {error, no_address};
-which_local_host_info(_LinkLocal, _Domain, [], Acc) ->
+net_which_local_host_info2([], Acc) ->
+    {ok, [net_which_local_host_info3(IF) || IF <- lists:reverse(Acc)]};
+net_which_local_host_info2([#{name := "tun" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "docker" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "br-" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "ap" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "anpi" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "vmenet" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "utun" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "bridge" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "llw" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "awdl" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "p2p" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "stf" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := "XHCZ" ++ _}|IFL], Acc) ->
+    net_which_local_host_info2(IFL, Acc);
+net_which_local_host_info2([#{name := Name} = IF|IFL], Acc) ->
+    ?DBG("~w -> entry with"
+         "~n   Name: ~p"
+         "~n   IF:   ~p",
+         [?FUNCTION_NAME, Name, IF]),
+    net_which_local_host_info2(IFL, [IF|Acc]).
+
+
+net_which_local_host_info3(#{name      := Name,
+                             flags     := Flags,
+                             addr      := #{family := inet = Domain,
+                                            addr   := Addr},
+                             netmask   := #{addr   := NetMask}} = HI) ->
+    BroadAddr = case maps:get(broadaddr, HI, undefined) of
+                    #{addr := BA} ->
+                        BA;
+                    _ ->
+                        undefined
+                end,
+    DestAddr = case maps:get(dstaddr, HI, undefined) of
+                   #{addr := DA} ->
+                        DA;
+                    _ ->
+                        undefined
+                end,
+    #{name      => Name,
+      domain    => Domain,
+      flags     => Flags,
+      addr      => Addr,
+      netmask   => NetMask,
+      dstaddr   => DestAddr,
+      broadaddr => BroadAddr};
+net_which_local_host_info3(#{name    := Name,
+                             flags   := Flags,
+                             addr    := #{family := inet6 = Domain,
+                                          addr   := Addr},
+                             netmask := #{addr   := NetMask}}) ->
+    #{name    => Name,
+      domain  => Domain,
+      flags   => Flags,
+      addr    => Addr,
+      netmask => NetMask}.
+
+
+net_getifaddrs(_LinkLocal, local = _Domain) ->
+    net:getifaddrs(#{family => local, flags => any});
+net_getifaddrs(LinkLocal, Domain) ->
+    Filter = fun(#{name  := _Name,
+                   flags := Flags,
+                   addr  := #{family := Family,
+                              addr   := Addr}}) when (Family =:= Domain) ->
+                     ?DBG("~w:filter-fun -> entry with"
+                          "~n   Name:   ~p"
+                          "~n   Flags:  ~p"
+                          "~n   Family: ~p"
+                          "~n   Addr:   ~p"
+                          "~nwhen"
+                          "~n   Domain: ~p",
+                          [_Name, Flags, Family, Addr, Domain]),
+                     lists:member(up, Flags) andalso
+                         lists:member(running, Flags) andalso
+                         (not lists:member(loopback, Flags)) andalso
+                         accept_address(LinkLocal, Addr);
+                (_) ->
+                     false
+             end,
+    net:getifaddrs(Filter).
+
+%% LinkLocal - Do we *want* a link local address (boolean())
+accept_address(LinkLocal, {A, B, _, _} = _Addr)
+  when (A =:= 169) andalso (B =:= 254) ->
+    %% This *is* a link local address:
+    %% Will be accepted only if we *are* looking for a link local address
+    LinkLocal;
+accept_address(LinkLocal, {A, _, _, _, _, _, _, _} = _Addr)
+  when (A =:= 16#fe80) ->
+    %% This *is* a link local address:
+    %% Will be accepted only if we *are* looking for a link local address
+    LinkLocal;
+accept_address(LinkLocal, Addr)
+  when is_tuple(Addr) andalso (tuple_size(Addr) =:= 4) ->
+    %% This is *not* a link local address:
+    %% Will be accepted only if we are *not* looking for a link local address
+    not LinkLocal;
+accept_address(LinkLocal, Addr)
+  when is_tuple(Addr) andalso (tuple_size(Addr) =:= 8) ->
+    %% This is *not* a link local address:
+    %% Will be accepted only if we are *not* looking for a link local address
+    not LinkLocal;
+accept_address(_LinkLocal, _Addr) ->
+    false.
+
+
+%% -- inet
+
+inet_which_local_host_info(LinkLocal, Domain) ->
+    ?DBG("~w -> entry with"
+         "~n   LinkLocal: ~p"
+         "~n   Domain:    ~p", [?FUNCTION_NAME, LinkLocal, Domain]),
+    case inet:getifaddrs() of
+        {ok, IFL} ->
+            ?DBG("~w -> "
+                 "~n   IFL: ~p", [?FUNCTION_NAME, IFL]),
+            inet_which_local_host_info(LinkLocal, Domain, IFL, []);
+        {error, _} = ERROR ->
+            ERROR
+    end.
+
+%% There are a bunch of "special" interfaces that we exclude:
+%% Here are some MacOS interfaces:
+%%   lo      (skip) is the loopback interface
+%%   en0     (keep) is your hardware interfaces (usually Ethernet and WiFi)
+%%   p2p0    (skip) is a point to point link (usually VPN)
+%%   stf0    (skip) is a "six to four" interface (IPv6 to IPv4)
+%%   gif01   (skip) is a software interface
+%%   bridge0 (skip) is a software bridge between other interfaces
+%%   utun0   (skip) is used for "Back to My Mac"
+%%   XHC20   (skip) is a USB network interface
+%%   awdl0   (skip) is Apple Wireless Direct Link (Bluetooth) to iOS devices
+%% What are these:
+%%   ap0
+%%   anpi0
+%%.  vmenet0
+%% On Mac, List hw: networksetup -listallhardwareports
+inet_which_local_host_info(_LinkLocal, _Domain, [], []) ->
+    {error, no_address};
+inet_which_local_host_info(_LinkLocal, _Domain, [], Acc) ->
     {ok, lists:reverse(Acc)};
-which_local_host_info(LinkLocal, Domain, [{"tun" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"docker" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"br-" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"ap" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"anpi" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"vmenet" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"utun" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"bridge" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"llw" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"awdl" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"p2p" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"stf" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{"XHCZ" ++ _, _}|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc);
-which_local_host_info(LinkLocal, Domain, [{Name, IFO}|IFL], Acc) ->
+inet_which_local_host_info(LinkLocal, Domain, [{"tun" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"docker" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"br-" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"ap" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"anpi" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"vmenet" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"utun" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"bridge" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"llw" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"awdl" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"p2p" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"stf" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{"XHCZ" ++ _, _}|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc);
+inet_which_local_host_info(LinkLocal, Domain, [{Name, IFO}|IFL], Acc) ->
     case if_is_running_and_not_loopback(IFO) of
         true ->
-            try which_local_host_info2(LinkLocal, Domain, IFO) of
+            try inet_which_local_host_info2(LinkLocal, Domain, IFO) of
                 Info ->
-                    which_local_host_info(LinkLocal, Domain, IFL,
-                                          [Info#{name => Name}|Acc])
+                    inet_which_local_host_info(LinkLocal, Domain, IFL,
+                                               [Info#{name => Name}|Acc])
             catch
-                throw:_:_ ->
-                    which_local_host_info(LinkLocal, Domain, IFL, Acc)
+                throw:_E:_ ->
+                    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc)
             end;
         false ->
-            which_local_host_info(LinkLocal, Domain, IFL, Acc)
+            inet_which_local_host_info(LinkLocal, Domain, IFL, Acc)
     end;
-which_local_host_info(LinkLocal, Domain, [_|IFL], Acc) ->
-    which_local_host_info(LinkLocal, Domain, IFL, Acc).
+inet_which_local_host_info(LinkLocal, Domain, [_|IFL], Acc) ->
+    inet_which_local_host_info(LinkLocal, Domain, IFL, Acc).
 
 if_is_running_and_not_loopback(If) ->
     lists:keymember(flags, 1, If) andalso
@@ -1950,8 +3038,8 @@ if_is_running_and_not_loopback(If) ->
         end.
 
 
-which_local_host_info2(LinkLocal, inet = _Domain, IFO) ->
-    Addr      = which_local_host_info3(
+inet_which_local_host_info2(LinkLocal, inet = _Domain, IFO) ->
+    Addr      = inet_which_local_host_info3(
                   addr,  IFO,
                   fun({A, _, _, _}) when (A =:= 127) -> false;
                      ({A, B, _, _}) when (A =:= 169) andalso 
@@ -1959,48 +3047,64 @@ which_local_host_info2(LinkLocal, inet = _Domain, IFO) ->
                      ({_, _, _, _}) -> not LinkLocal;
                      (_) -> false
                   end),
-    NetMask   = which_local_host_info3(netmask,  IFO,
-                                       fun({_, _, _, _}) -> true;
-                                          (_) -> false
-                                       end),
-    BroadAddr = which_local_host_info3(broadaddr,  IFO,
-                                       fun({_, _, _, _}) -> true;
-                                          (_) -> false
-                                       end),
-    Flags     = which_local_host_info3(flags, IFO, fun(_) -> true end),
+    NetMask   = try inet_which_local_host_info3(netmask,  IFO,
+                                                fun({_, _, _, _}) -> true;
+                                                   (_) -> false
+                                                end)
+		catch
+		    throw:{error, no_address} ->
+			undefined
+		end,
+    BroadAddr = try inet_which_local_host_info3(broadaddr,  IFO,
+                                                fun({_, _, _, _}) -> true;
+                                                   (_) -> false
+                                                end)
+		catch
+		    throw:{error, no_address} ->
+			undefined
+		end,
+    Flags     = try inet_which_local_host_info3(flags, IFO, fun(_) -> true end)
+		catch
+		    throw:{error, no_address} ->
+			[]
+		end,
     #{flags     => Flags,
       addr      => Addr,
       broadaddr => BroadAddr,
       netmask   => NetMask};
-which_local_host_info2(LinkLocal, inet6 = _Domain, IFO) ->
-    Addr    = which_local_host_info3(addr,  IFO,
-                                     fun({A, _, _, _, _, _, _, _}) 
-                                           when (A =:= 0) -> false;
-                                        ({A, _, _, _, _, _, _, _})
-                                           when (A =:= 16#fe80) -> LinkLocal;
-                                        ({_, _, _, _, _, _, _, _}) -> not LinkLocal;
-                                        (_) -> false
-                                     end),
-    NetMask = which_local_host_info3(netmask,  IFO,
-                                       fun({_, _, _, _, _, _, _, _}) -> true;
-                                          (_) -> false
-                                       end),
-    Flags   = which_local_host_info3(flags, IFO, fun(_) -> true end),
+inet_which_local_host_info2(LinkLocal, inet6 = _Domain, IFO) ->
+    Addr    = inet_which_local_host_info3(
+                addr,  IFO,
+                fun({A, _, _, _, _, _, _, _}) 
+                      when (A =:= 0) -> false;
+                   ({A, _, _, _, _, _, _, _})
+                      when (A =:= 16#fe80) -> LinkLocal;
+                   ({_, _, _, _, _, _, _, _}) -> not LinkLocal;
+                   (_) -> false
+                end),
+    NetMask = inet_which_local_host_info3(
+                netmask,  IFO,
+                fun({_, _, _, _, _, _, _, _}) -> true;
+                   (_) -> false
+                end),
+    Flags   = inet_which_local_host_info3(flags, IFO, fun(_) -> true end),
     #{flags   => Flags,
       addr    => Addr,
       netmask => NetMask}.
 
-which_local_host_info3(_Key, [], _) ->
+inet_which_local_host_info3(_Key, [], _) ->
     throw({error, no_address});
-which_local_host_info3(Key, [{Key, Val}|IFO], Check) ->
+inet_which_local_host_info3(Key, [{Key, Val}|IFO], Check) ->
     case Check(Val) of
         true ->
+            ?DBG("~w -> validated", [?FUNCTION_NAME]),    
             Val;
         false ->
-            which_local_host_info3(Key, IFO, Check)
+            inet_which_local_host_info3(Key, IFO, Check)
     end;
-which_local_host_info3(Key, [_|IFO], Check) ->
-    which_local_host_info3(Key, IFO, Check).
+inet_which_local_host_info3(Key, [_|IFO], Check) ->
+    inet_which_local_host_info3(Key, IFO, Check).
+
 
 
 
@@ -2011,6 +3115,19 @@ not_yet_implemented() ->
 
 skip(Reason) ->
     throw({skip, Reason}).
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ts() ->
+    ts(ms).
+
+ts(s) ->
+    erlang:system_time(second);
+ts(ms) ->
+    erlang:system_time(millisecond);
+ts(us) ->
+    erlang:system_time(microsecond).
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -2028,8 +3145,23 @@ format_timestamp({_N1, _N2, N3} = TS) ->
                              [Hour, Min, Sec, N3 div 1000]),  
     lists:flatten(FormatTS).
 
+
 print(F) ->
     print(F, []).
 
 print(F, A) ->
-    io:format("~s ~p " ++ F ++ "~n", [formated_timestamp(), self() | A]).
+    print("", F, A).
+
+print(Prefix, F, A) ->
+    io:format("~s[~s , ~p] " ++ F ++ "~n",
+              [Prefix, formated_timestamp(), self() | A]).
+
+
+dbg(F, A) ->
+    dbg(get(debug), F, A).
+
+dbg(true, F, A) ->
+    print("DEBUG", F, A);
+dbg(_, _, _) ->
+    ok.
+

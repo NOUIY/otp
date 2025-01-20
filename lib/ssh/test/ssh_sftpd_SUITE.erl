@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2020. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@
 -define(PASSWD, "Sesame").
 %% -define(XFER_PACKET_SIZE, 32768).
 %% -define(XFER_WINDOW_SIZE, 4*?XFER_PACKET_SIZE).
--define(SSH_TIMEOUT, 10000).
+-define(SSH_TIMEOUT, 5000).
 -define(REG_ATTERS, <<0,0,0,0,1>>).
 -define(UNIX_EPOCH,  62167219200).
 
@@ -80,7 +80,7 @@
 %%--------------------------------------------------------------------
 
 suite() ->
-    [{timetrap,{seconds,40}}].
+    [{timetrap,{seconds,20}}].
 
 all() -> 
     [open_close_file, 
@@ -405,7 +405,7 @@ rename_file(Config) when is_list(Config) ->
     NewReqId1 = NewReqId + 1,
     file:copy(FileName, NewFileName),
 
-    %% No owerwrite
+    %% No overwrite
     {ok, <<?SSH_FXP_STATUS, ?UINT32(NewReqId1),
 	  ?UINT32(?SSH_FX_FILE_ALREADY_EXISTS), _/binary>>, _} =
 	rename(FileName, NewFileName, Cm, Channel, NewReqId1, 6,
@@ -685,7 +685,7 @@ access_outside_root(Config) when is_list(Config) ->
     BadFilePath = filename:join([BaseDir, bad]),
     ok = file:write_file(BadFilePath, <<>>),
     {Cm, Channel} = proplists:get_value(sftp, Config),
-    %% Try to access a file parallell to the RootDir:
+    %% Try to access a file parallel to the RootDir:
     try_access("/../bad",   Cm, Channel, 0),
     %% Try to access the same file via the CWD which is /b relative to the RootDir:
     try_access("../../bad", Cm, Channel, 1).
@@ -717,7 +717,7 @@ try_access(Path, Cm, Channel, ReqId) ->
                     end
             end;
         _ ->
-            ct:fail("Completly unexpected return: ~p", [Return])
+            ct:fail("Completely unexpected return: ~p", [Return])
     end.
 
 %%--------------------------------------------------------------------

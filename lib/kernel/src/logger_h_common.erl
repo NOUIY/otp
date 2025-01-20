@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2017-2020. All Rights Reserved.
+%% Copyright Ericsson AB 2017-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 %% %CopyrightEnd%
 %%
 -module(logger_h_common).
+-moduledoc false.
 -behaviour(gen_server).
 
 -include("logger_h_common.hrl").
@@ -168,7 +169,7 @@ changing_config(SetOrUpdate,
 %%% Log a string or report
 -spec log(LogEvent, Config) -> ok when
       LogEvent :: logger:log_event(),
-      Config :: logger:handler_config().
+      Config :: logger_handler:config().
 
 log(LogEvent, Config = #{config := #{olp:=Olp}}) ->
     %% if the handler has crashed, we must drop this event
@@ -260,28 +261,6 @@ handle_call(filesync, _From, State = #{id := Name,
     {Result,HandlerState1} = Module:filesync(Name,sync,HandlerState),
     {reply, Result, State#{handler_state=>HandlerState1, last_op=>sync}}.
 
-%% If FILESYNC_REPEAT_INTERVAL is set to a millisec value, this
-%% clause gets called repeatedly by the handler. In order to
-%% guarantee that a filesync *always* happens after the last log
-%% event, the repeat operation must be active!
-handle_cast(repeated_filesync,State = #{filesync_repeat_interval := no_repeat}) ->
-    %% This clause handles a race condition which may occur when
-    %% config changes filesync_repeat_interval from an integer value
-    %% to no_repeat.
-    {noreply,State};
-handle_cast(repeated_filesync,
-            State = #{id := Name,
-                      module := Module,
-                      handler_state := HandlerState,
-                      last_op := LastOp}) ->
-    State1 =
-        if LastOp == sync ->
-                State;
-           true ->
-                {_,HS} = Module:filesync(Name, async, HandlerState),
-                State#{handler_state => HS, last_op => sync}
-        end,
-    {noreply,set_repeated_filesync(State1)};
 handle_cast({config_changed, CommonConfig, HConfig},
             State = #{id := Name,
                       module := Module,
@@ -301,6 +280,31 @@ handle_cast({config_changed, CommonConfig, HConfig},
          end,
     {noreply, State1#{handler_state => HS}}.
 
+%% If FILESYNC_REPEAT_INTERVAL is set to a millisec value, this
+%% clause gets called repeatedly by the handler. In order to
+%% guarantee that a filesync *always* happens after the last log
+%% event, the repeat operation must be active!
+handle_info({timeout, TRef, repeated_filesync},
+            State = #{rep_sync_tref := TRef,
+                      filesync_repeat_interval := no_repeat}) ->
+    %% This clause handles a race condition which may occur when
+    %% config changes filesync_repeat_interval from an integer value
+    %% to no_repeat.
+    {noreply,State};
+handle_info({timeout, TRef, repeated_filesync},
+            State = #{id := Name,
+                      rep_sync_tref := TRef,
+                      module := Module,
+                      handler_state := HandlerState,
+                      last_op := LastOp}) ->
+    State1 =
+        if LastOp == sync ->
+                State;
+           true ->
+                {_,HS} = Module:filesync(Name, async, HandlerState),
+                State#{handler_state => HS, last_op => sync}
+        end,
+    {noreply,set_repeated_filesync(State1)};
 handle_info(Info, #{id := Name, module := Module,
                     handler_state := HandlerState} = State) ->
     {noreply,State#{handler_state => Module:handle_info(Name,Info,HandlerState)}}.
@@ -347,7 +351,7 @@ call(_, Name, Op) ->
     {error,{badarg,{Op,[Name]}}}.
 
 notify({mode_change,Mode0,Mode1},#{id:=Name}=State) ->
-    log_handler_info(Name,"Handler ~p switched from  ~p to ~p mode",
+    log_handler_info(Name,"Handler ~p switched from ~p to ~p mode",
                      [Name,Mode0,Mode1], State);
 notify({flushed,Flushed},#{id:=Name}=State) ->
     log_handler_info(Name, "Handler ~p flushed ~w log events",
@@ -376,7 +380,7 @@ log_handler_info(Name, Format, Args, #{module:=Module,
 %%% Convert log data on any form to binary
 -spec log_to_binary(LogEvent,Config) -> LogString when
       LogEvent :: logger:log_event(),
-      Config :: logger:handler_config(),
+      Config :: logger_handler:config(),
       LogString :: binary().
 log_to_binary(#{msg:={report,_},meta:=#{report_cb:=_}}=Log,Config) ->
     do_log_to_binary(Log,Config);
@@ -445,8 +449,7 @@ get_default_config() ->
 
 set_repeated_filesync(#{filesync_repeat_interval:=FSyncInt} = State)
   when is_integer(FSyncInt) ->
-    {ok,TRef} = timer:apply_after(FSyncInt, gen_server, cast,
-                                  [self(),repeated_filesync]),
+    TRef = erlang:start_timer(FSyncInt, self(), repeated_filesync),
     State#{rep_sync_tref=>TRef};
 set_repeated_filesync(State) ->
     State.
@@ -454,7 +457,15 @@ set_repeated_filesync(State) ->
 cancel_repeated_filesync(State) ->
     case maps:take(rep_sync_tref,State) of
         {TRef,State1} ->
-            _ = timer:cancel(TRef),
+            case erlang:cancel_timer(TRef) of
+                false ->
+                    %% Flush the timer message
+                    receive
+                        {timeout, TRef, _} -> ok
+                    end;
+                _ ->
+                    ok
+            end,
             State1;
         error ->
             State

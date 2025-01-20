@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -81,8 +81,6 @@
 
 -export([ipread/1]).
 
--export([pid2name/1]).
-
 -export([interleaved_read_write/1]).
 
 -export([unicode/1]).
@@ -136,7 +134,7 @@ all() ->
      {group, files}, delete, rename, names, volume_relative_paths, unc_paths,
      {group, errors}, {group, compression}, {group, links}, copy,
      delayed_write, read_ahead, segment_read, segment_write,
-     ipread, pid2name, interleaved_read_write, otp_5814, otp_10852,
+     ipread, interleaved_read_write, otp_5814, otp_10852,
      large_file, large_write, read_line_1, read_line_2, read_line_3,
      read_line_4, standard_io, old_io_protocol,
      unicode_mode, {group, bench}
@@ -535,6 +533,9 @@ read_write_file(Config) when is_list(Config) ->
     {error, enoent} = ?FILE_MODULE:read_file(Name2),
     {error, enoent} = ?FILE_MODULE:read_file(""),
     {error, enoent} = ?FILE_MODULE:read_file(''),
+    {error, enoent} = ?FILE_MODULE:read_file(Name2, [raw]),
+    {error, enoent} = ?FILE_MODULE:read_file("", [raw]),
+    {error, enoent} = ?FILE_MODULE:read_file('', [raw]),
 
     %% Try writing to a bad filename
     {error, enoent} = do_read_write_file("", Bin2),
@@ -559,12 +560,15 @@ do_read_write_file(Name, Data) ->
 	ok ->
 	    BinData = iolist_to_binary(Data),
 	    {ok,BinData} = ?FILE_MODULE:read_file(Name),
+	    {ok,BinData} = ?FILE_MODULE:read_file(Name, [raw]),
 
 	    ok = ?FILE_MODULE:write_file(Name, Data, []),
 	    {ok,BinData} = ?FILE_MODULE:read_file(Name),
+	    {ok,BinData} = ?FILE_MODULE:read_file(Name, [raw]),
 
 	    ok = ?FILE_MODULE:write_file(Name, Data, [raw]),
 	    {ok,BinData} = ?FILE_MODULE:read_file(Name),
+	    {ok,BinData} = ?FILE_MODULE:read_file(Name, [raw]),
 
 	    ok;
 	{error,_}=Res ->
@@ -809,10 +813,12 @@ list_dir_1(TestDir, Cnt, Sorted0) ->
 
 untranslatable_names(Config) ->
     case no_untranslatable_names() of
-	true ->
-	    {skip,"Not a problem on this OS"};
 	false ->
-	    untranslatable_names_1(Config)
+	    untranslatable_names_1(Config);
+        os ->
+	    {skip,"Not a problem on this OS"};
+        fs ->
+            {skip,"Not a problem on this FS"}
     end.
 
 untranslatable_names_1(Config) ->
@@ -820,7 +826,7 @@ untranslatable_names_1(Config) ->
     PrivDir = proplists:get_value(priv_dir, Config),
     Dir = filename:join(PrivDir, "untranslatable_names"),
     ok = file:make_dir(Dir),
-    Node = start_node(untranslatable_names, "+fnu"),
+    {ok, Peer, Node} = ?CT_PEER(["+fnu"]),
     try
 	ok = file:set_cwd(Dir),
 	[ok = file:write_file(F, F) || {_,F} <- untranslatable_names()],
@@ -841,7 +847,7 @@ untranslatable_names_1(Config) ->
 	io:format("ExpectedListDirAll: ~p\n", [ExpectedListDirAll]),
 	ExpectedListDirAll = call_and_sort(Node, file, list_dir_all, [Dir])
     after
-	catch test_server:stop_node(Node),
+	catch peer:stop(Peer),
 	file:set_cwd(OldCwd),
 	[file:delete(F) || {_,F} <- untranslatable_names()],
 	file:del_dir(Dir)
@@ -850,10 +856,12 @@ untranslatable_names_1(Config) ->
 
 untranslatable_names_error(Config) ->
     case no_untranslatable_names() of
-	true ->
-	    {skip,"Not a problem on this OS"};
 	false ->
-	    untranslatable_names_error_1(Config)
+	    untranslatable_names_error_1(Config);
+        os ->
+	    {skip,"Not a problem on this OS"};
+        fs ->
+            {skip,"Not a problem on this FS"}
     end.
 
 untranslatable_names_error_1(Config) ->
@@ -861,7 +869,7 @@ untranslatable_names_error_1(Config) ->
     PrivDir = proplists:get_value(priv_dir, Config),
     Dir = filename:join(PrivDir, "untranslatable_names_error"),
     ok = file:make_dir(Dir),
-    Node = start_node(untranslatable_names, "+fnue"),
+    {ok, Peer, Node} = ?CT_PEER(["+fnue"]),
     try
 	ok = file:set_cwd(Dir),
 	[ok = file:write_file(F, F) || {_,F} <- untranslatable_names()],
@@ -875,7 +883,7 @@ untranslatable_names_error_1(Config) ->
 	true = lists:keymember(BadFile, 2, untranslatable_names())
 
     after
-	catch test_server:stop_node(Node),
+	catch peer:stop(Peer),
 	file:set_cwd(OldCwd),
 	[file:delete(F) || {_,F} <- untranslatable_names()],
 	file:del_dir(Dir)
@@ -896,22 +904,22 @@ call_and_sort(Node, M, F, A) ->
 
 no_untranslatable_names() ->
     case os:type() of
-	{unix,darwin} -> true;
-	{win32,_} -> true;
-	_ -> false
+	{unix,darwin} -> os;
+	{win32,_} -> os;
+	_ ->
+            %% If we are using utf8only on zfs then we cannot create latin1 characters.
+            case os:find_executable("zfs") of
+                false ->
+                    false;
+                _Zfs ->
+                    case os:cmd("zfs get utf8only `pwd` | grep utf8only | awk '{print $3}'") of
+                        "on" ++ _ ->
+                            fs;
+                        _ ->
+                            false
+                    end
+            end
     end.
-
-start_node(Name, Args) ->
-    [_,Host] = string:lexemes(atom_to_list(node()), "@"),
-    ct:log("Trying to start ~w@~s~n", [Name,Host]),
-    case test_server:start_node(Name, peer, [{args,Args}]) of
-	{error,Reason} ->
-	    ct:fail(Reason);
-	{ok,Node} ->
-	    ct:log("Node ~p started~n", [Node]),
-	    Node
-    end.
-
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -1415,8 +1423,8 @@ file_info_basic_file(Config) when is_list(Config) ->
 
     %% Create a short file.
     Name = filename:join(RootDir,
-			 atom_to_list(?MODULE)
-			 ++"_basic_test.fil"),
+			 atom_to_list(?MODULE) ++ "_" ++
+                         atom_to_list(?FUNCTION_NAME) ++ ".fil"),
     {ok,Fd1} = ?FILE_MODULE:open(Name, write),
     io:put_chars(Fd1, "foo bar"),
     ok = ?FILE_MODULE:close(Fd1),
@@ -1521,8 +1529,8 @@ file_info_int(Config) ->
     io:format("RootDir = ~p", [RootDir]),
 
     Name = filename:join(RootDir,
-			 atom_to_list(?MODULE)
-			 ++"_file_info.fil"),
+			 atom_to_list(?MODULE) ++ "_" ++
+                         atom_to_list(?FUNCTION_NAME) ++ ".fil"),
     {ok,Fd1} = ?FILE_MODULE:open(Name,write),
     io:put_chars(Fd1,"foo"),
 
@@ -1600,8 +1608,8 @@ file_handle_info_basic_file(Config) when is_list(Config) ->
 
     %% Create a short file.
     Name = filename:join(RootDir,
-			 atom_to_list(?MODULE)
-			 ++"_basic_test.fil"),
+			 atom_to_list(?MODULE) ++ "_" ++
+			 atom_to_list(?FUNCTION_NAME) ++ ".fil"),
     {ok,Fd1} = ?FILE_MODULE:open(Name, write),
     io:put_chars(Fd1, "foo bar"),
     ok = ?FILE_MODULE:close(Fd1),
@@ -1696,8 +1704,8 @@ file_handle_info_int(Config) ->
     io:format("RootDir = ~p", [RootDir]),
 
     Name = filename:join(RootDir,
-			 atom_to_list(?MODULE)
-			 ++"_file_info.fil"),
+			 atom_to_list(?MODULE) ++ "_" ++
+			 atom_to_list(?FUNCTION_NAME) ++ ".fil"),
     {ok,Fd1} = ?FILE_MODULE:open(Name, write),
     io:put_chars(Fd1,"foo"),
     {ok,FileInfo1} = ?FILE_MODULE:read_file_info(Fd1),
@@ -2329,6 +2337,23 @@ delete(Config) when is_list(Config) ->
     {error, _} = ?FILE_MODULE:open(Name2, read),
     %% Try deleting a nonexistent file with the raw option
     {error, enoent} = ?FILE_MODULE:delete(Name2, [raw]),
+
+    Name3 = filename:join(RootDir,
+                          atom_to_list(?MODULE)
+                          ++"_delete_3.fil"),
+    {ok, Fd5} = ?FILE_MODULE:open(Name3, write),
+    io:format(Fd5,"ok.\n",[]),
+    ok = ?FILE_MODULE:close(Fd5),
+    %% Check that the file is readable
+    {ok, Fd6} = ?FILE_MODULE:open(Name3, read),
+    ok = ?FILE_MODULE:close(Fd6),
+    %% Try deleting with no option, should be equivalent to delete/1
+    ok = ?FILE_MODULE:delete(Name3, []),
+    %% Check that the file is not readable anymore
+    {error, _} = ?FILE_MODULE:open(Name3, read),
+    %% Try deleting a nonexistent file with no option
+    {error, enoent} = ?FILE_MODULE:delete(Name3, []),
+
     [] = flush(),
     ok.
 
@@ -3437,24 +3462,6 @@ delayed_write(Config) when is_list(Config) ->
     ok.
 
 
-%% Tests file:pid2name/1.
-pid2name(Config) when is_list(Config) ->
-    RootDir = proplists:get_value(priv_dir, Config),
-    Base = test_server:temp_name(
-	     filename:join(RootDir, "pid2name_")),
-    Name1 = [Base, '.txt'],
-    Name2 = Base ++ ".txt",
-    %%
-    {ok, Pid} = file:open(Name1, [write]),
-    {ok, Name2} = file:pid2name(Pid),
-    undefined = file:pid2name(self()),
-    ok = file:close(Pid),
-    ct:sleep(1000),
-    false = is_process_alive(Pid),
-    undefined = file:pid2name(Pid),
-    ok.
-
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Tests the file open option {read_ahead, Size}.
@@ -4003,7 +4010,15 @@ ok.
 
 %% OTP-10852. +fnu and latin1 filenames.
 otp_10852(Config) when is_list(Config) ->
-    Node = start_node(erl_pp_helper, "+fnu"),
+    case no_untranslatable_names() of
+        fs ->
+            {skip,"Not a problem on this FS"};
+	_ ->
+	    otp_10852_1(Config)
+    end.
+
+otp_10852_1(Config) ->
+    {ok, Peer, Node} = ?CT_PEER(["+fnu"]),
     Dir = proplists:get_value(priv_dir, Config),
     B = filename:join(Dir, <<"\xE4">>),
     ok = rpc_call(Node, get_cwd, [B]),
@@ -4046,7 +4061,7 @@ otp_10852(Config) when is_list(Config) ->
             {ok, Fd2, B} = rpc_call(Node, path_open, [["."], B, [read]]),
             ok = rpc_call(Node, close, [Fd2])
     end,
-    true = test_server:stop_node(Node),
+    peer:stop(Peer),
     ok.
 
 rpc_call(N, F, As) ->
@@ -4104,6 +4119,21 @@ do_large_file(Name) ->
     {ok,R}   = ?FILE_MODULE:read(F1, L+1),
     ok       = ?FILE_MODULE:close(F1),
 
+    %% Reopen the file try to read all of it; used to fail on macOS
+    %% We open with binary in order to not get a memory explosion.
+    {ok, F2} = ?FILE_MODULE:open(Name, [raw,read,binary]),
+    IsWindows = element(1,os:type()) =:= win32,
+    case {?FILE_MODULE:read(F2, P), erlang:system_info(wordsize)} of
+        {{ok, B}, 8} ->
+            P = byte_size(B);
+        {eof, 8} when IsWindows ->
+            ok;
+        {eof, 4} ->
+            %% Cannot read such large files on 32-bit
+            ok
+    end,
+    ok = ?FILE_MODULE:close(F2),
+
     ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -4131,6 +4161,10 @@ do_large_write(Name) ->
 	    Bin = <<0:Size/unit:8>>,
 	    ok = file:write_file(Name, Bin),
 	    {ok,#file_info{size=Size}} = file:read_file_info(Name),
+
+            %% Even multiples of MAX_SYSIOVEC_IOVLEN would cause a crash
+            ok = file:write_file(Name, binary:part(Bin, 0, 1 bsl 31)),
+	    {ok,#file_info{size=1 bsl 31}} = file:read_file_info(Name),
 	    ok
     end.
 
@@ -4809,28 +4843,37 @@ do_run_large_file_test(Config, Run, Name0) ->
     Name = filename:join(proplists:get_value(priv_dir, Config),
 			 ?MODULE_STRING ++ Name0),
 
+    %% We run the test in a peer node in case the OOM killer
+    {ok, Peer, Node} = ?CT_PEER(),
+
+    erpc:call(Node, application, ensure_all_started, [os_mon]),
+
     %% Set up a process that will delete this file.
     Tester = self(),
     Deleter = 
-	spawn(
-	  fun() ->
-		  Mref = erlang:monitor(process, Tester),
-		  receive
-		      {'DOWN',Mref,_,_,_} -> ok;
-		      {Tester,done} -> ok
-		  end,
-		  ?FILE_MODULE:delete(Name)
-	  end),
+        spawn(
+          fun() ->
+                  Mref = erlang:monitor(process, Tester),
+                  receive
+                      {'DOWN',Mref,_,_,_} -> ok;
+                      {Tester,done} -> ok
+                  end,
+                  ?FILE_MODULE:delete(Name)
+          end),
 
     %% Run the test case.
-    Res = Run(Name),
+    try
+        Res = erpc:call(Node, fun() -> Run(Name) end),
 
-    %% Delete file and finish deleter process.
-    Mref = erlang:monitor(process, Deleter),
-    Deleter ! {Tester,done},
-    receive {'DOWN',Mref,_,_,_} -> ok end,
+        %% Delete file and finish deleter process.
+        Mref = erlang:monitor(process, Deleter),
+        Deleter ! {Tester,done},
+        receive {'DOWN',Mref,_,_,_} -> ok end,
 
-    Res.
+        Res
+    after
+        peer:stop(Peer)
+    end.
 
 disc_free(Path) ->
     Data = disksup:get_disk_data(),
@@ -4848,5 +4891,10 @@ disc_free(Path) ->
     end.
 
 memsize() ->
-    {Tot,_Used,_}  = memsup:get_memory_data(),
-    Tot.
+    case proplists:get_value(available_memory, memsup:get_system_memory_data()) of
+        undefined ->
+            {Tot,_Used,_}  = memsup:get_memory_data(),
+            Tot;
+        Available ->
+            Available
+    end.

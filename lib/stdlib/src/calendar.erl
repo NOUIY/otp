@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,73 @@
 %% %CopyrightEnd%
 %%
 -module(calendar).
+-moduledoc """
+Local and universal time, day of the week, date and time conversions.
+
+This module provides computation of local and universal time, day of the week,
+and many time conversion functions.
+
+Time is local when it is adjusted in accordance with the current time zone and
+daylight saving. Time is universal when it reflects the time at longitude zero,
+without any adjustment for daylight saving. Universal Coordinated Time (UTC)
+time is also called Greenwich Mean Time (GMT).
+
+The time functions `local_time/0` and `universal_time/0` in this module both
+return date and time. This is because separate functions for date and time can
+result in a date/time combination that is displaced by 24 hours. This occurs if
+one of the functions is called before midnight, and the other after midnight.
+This problem also applies to the Erlang BIFs `date/0` and `time/0`, and their
+use is strongly discouraged if a reliable date/time stamp is required.
+
+All dates conform to the Gregorian calendar. This calendar was introduced by
+Pope Gregory XIII in 1582 and was used in all Catholic countries from this year.
+Protestant parts of Germany and the Netherlands adopted it in 1698, England
+followed in 1752, and Russia in 1918 (the October revolution of 1917 took place
+in November according to the Gregorian calendar).
+
+The Gregorian calendar in this module is extended back to year 0. For a given
+date, the _gregorian days_ is the number of days up to and including the date
+specified. Similarly, the _gregorian seconds_ for a specified date and time is
+the number of seconds up to and including the specified date and time.
+
+For computing differences between epochs in time, use the functions counting
+gregorian days or seconds. If epochs are specified as local time, they must be
+converted to universal time to get the correct value of the elapsed time between
+epochs. Use of function [`time_difference/2`](`time_difference/2`) is
+discouraged.
+
+Different definitions exist for the week of the year. This module contains a
+week of the year implementation conforming to the ISO 8601 standard. As the week
+number for a specified date can fall on the previous, the current, or on the
+next year, it is important to specify both the year and the week number.
+Functions `iso_week_number/0` and [`iso_week_number/1`](`iso_week_number/1`)
+return a tuple of the year and the week number.
+
+## Leap Years
+
+The notion that every fourth year is a leap year is not completely true. By the
+Gregorian rule, a year Y is a leap year if one of the following rules is valid:
+
+- Y is divisible by 4, but not by 100.
+- Y is divisible by 400.
+
+Hence, 1996 is a leap year, 1900 is not, but 2000 is.
+
+## Date and Time Source
+
+Local time is obtained from the Erlang BIF `localtime/0`. Universal time is
+computed from the BIF `universaltime/0`.
+
+The following apply:
+
+- There are 86400 seconds in a day.
+- There are 365 days in an ordinary year.
+- There are 366 days in a leap year.
+- There are 1461 days in a 4 year period.
+- There are 36524 days in a 100 year period.
+- There are 146097 days in a 400 year period.
+- There are 719528 days between Jan 1, 0 and Jan 1, 1970.
+""".
 
 %% local and universal time, time conversions
 
@@ -76,6 +143,12 @@
 
 -export_type([date/0, time/0, datetime/0, datetime1970/0]).
 
+-doc """
+The year using the Gregorian calendar.
+
+Year cannot be abbreviated. For example, 93 denotes year 93, not 1993. The valid
+range depends on the underlying operating system.
+""".
 -type year()     :: non_neg_integer().
 -type year1970() :: 1970..10000.	% should probably be 1970..
 -type month()    :: 1..12.
@@ -84,16 +157,31 @@
 -type minute()   :: 0..59.
 -type second()   :: 0..59.
 -type daynum()   :: 1..7.
+-doc "The last day of the month.".
 -type ldom()     :: 28 | 29 | 30 | 31. % last day of month
 -type weeknum()  :: 1..53.
 
+-doc """
+A date using the Gregorian calendar.
+
+All APIs expect this to be a valid date. If the source of the date
+is unknown, then verify that is it valid by calling `valid_date/1`
+before using it.
+""".
 -type date()           :: {year(),month(),day()}.
 -type time()           :: {hour(),minute(),second()}.
 -type datetime()       :: {date(),time()}.
 -type datetime1970()   :: {{year1970(),month(),day()},time()}.
 -type yearweeknum()    :: {year(),weeknum()}.
 
--type rfc3339_string() :: [byte(), ...].
+-type rfc3339_string() :: [byte(), ...] | binary().
+-doc """
+The time unit used by the rfc3339 conversion functions.
+
+> #### Note {: .info }
+>
+> The `native` time unit was added to `t:rfc3339_time_unit/0` in OTP 25.0.
+""".
 -type rfc3339_time_unit() :: 'microsecond'
                            | 'millisecond'
                            | 'nanosecond'
@@ -124,6 +212,7 @@
 %% January 1st.
 %%
 %% df/2 catches the case Year<0
+-doc(#{equiv => date_to_gregorian_days({Year, Month, Day})}).
 -spec date_to_gregorian_days(Year, Month, Day) -> Days when
       Year :: year(),
       Month :: month(),
@@ -136,6 +225,10 @@ date_to_gregorian_days(Year, Month, Day) when is_integer(Day), Day > 0 ->
 	    dy(Year) + dm(Month) + df(Year, Month) + Day - 1
     end.
 
+-doc """
+Computes the number of gregorian days starting with year 0 and ending at the
+specified date.
+""".
 -spec date_to_gregorian_days(Date) -> Days when
       Date :: date(),
       Days :: non_neg_integer().
@@ -148,6 +241,10 @@ date_to_gregorian_days({Year, Month, Day}) ->
 %% Computes the total number of seconds starting from year 0,
 %% January 1st.
 %%
+-doc """
+Computes the number of gregorian seconds starting with year 0 and ending at the
+specified date and time.
+""".
 -spec datetime_to_gregorian_seconds(DateTime) -> Seconds when
       DateTime :: datetime(),
       Seconds :: non_neg_integer().
@@ -161,6 +258,7 @@ datetime_to_gregorian_seconds({Date, Time}) ->
 %%
 %% Returns: 1 | .. | 7. Monday = 1, Tuesday = 2, ..., Sunday = 7.
 %%
+-doc(#{equiv => day_of_the_week({Year, Month, Day})}).
 -spec day_of_the_week(Year, Month, Day) -> daynum() when
       Year :: year(),
       Month :: month(),
@@ -168,6 +266,10 @@ datetime_to_gregorian_seconds({Date, Time}) ->
 day_of_the_week(Year, Month, Day) ->
     (date_to_gregorian_days(Year, Month, Day) + 5) rem 7 + 1.
 
+-doc """
+Computes the day of the week from the specified `Year`, `Month`, and `Day`.
+Returns the day of the week as `1`: Monday, `2`: Tuesday, and so on.
+""".
 -spec day_of_the_week(Date) -> daynum() when
       Date:: date().
 day_of_the_week({Year, Month, Day}) ->
@@ -176,6 +278,7 @@ day_of_the_week({Year, Month, Day}) ->
 
 %% gregorian_days_to_date(Days) = {Year, Month, Day}
 %%
+-doc "Computes the date from the specified number of gregorian days.".
 -spec gregorian_days_to_date(Days) -> date() when
       Days :: non_neg_integer().
 gregorian_days_to_date(Days) ->
@@ -186,6 +289,7 @@ gregorian_days_to_date(Days) ->
 
 %% gregorian_seconds_to_datetime(Secs)
 %%
+-doc "Computes the date and time from the specified number of gregorian seconds.".
 -spec gregorian_seconds_to_datetime(Seconds) -> datetime() when
       Seconds :: non_neg_integer().
 gregorian_seconds_to_datetime(Secs) when Secs >= 0 ->
@@ -196,6 +300,7 @@ gregorian_seconds_to_datetime(Secs) when Secs >= 0 ->
 
 %% is_leap_year(Year) = true | false
 %%
+-doc "Checks if the specified year is a leap year.".
 -spec is_leap_year(Year) -> boolean() when
       Year :: year().
 is_leap_year(Y) when is_integer(Y), Y >= 0 ->
@@ -212,6 +317,11 @@ is_leap_year1(_) -> false.
 %%
 %% Calculates the iso week number for the current date.
 %%
+-doc """
+Returns tuple `{Year, WeekNum}` representing the ISO week number for the actual
+date. To determine the actual date, use function `local_time/0`.
+""".
+-doc(#{since => <<"OTP R14B02">>}).
 -spec iso_week_number() -> yearweeknum().
 iso_week_number() ->
     {Date, _} = local_time(),
@@ -221,6 +331,11 @@ iso_week_number() ->
 %%
 %% Calculates the iso week number for the given date.
 %%
+-doc """
+Returns tuple `{Year, WeekNum}` representing the ISO week number for the
+specified date.
+""".
+-doc(#{since => <<"OTP R14B02">>}).
 -spec iso_week_number(Date) -> yearweeknum() when
       Date :: date().
 iso_week_number({Year, Month, Day}) ->
@@ -250,6 +365,7 @@ iso_week_number({Year, Month, Day}) ->
 %%
 %% Returns the number of days in a month.
 %%
+-doc "Computes the number of days in a month.".
 -spec last_day_of_the_month(Year, Month) -> LastDay when
       Year :: year(),
       Month :: month(),
@@ -274,6 +390,7 @@ last_day_of_the_month1(_, M) when is_integer(M), M > 0, M < 13 ->
 %% local_time()
 %%
 %% Returns: {date(), time()}, date() = {Y, M, D}, time() = {H, M, S}.
+-doc "Returns the local time reported by the underlying operating system.".
 -spec local_time() -> datetime().
 local_time() ->
     erlang:localtime().
@@ -281,18 +398,48 @@ local_time() ->
 
 %% local_time_to_universal_time(DateTime)
 %%
+-doc """
+Converts from local time to Universal Coordinated Time (UTC). `DateTime1` must
+refer to a local date after Jan 1, 1970.
+
+> #### Warning {: .warning }
+>
+> This function is deprecated. Use `local_time_to_universal_time_dst/1` instead,
+> as it gives a more correct and complete result. Especially for the period that
+> does not exist, as it is skipped during the switch _to_ daylight saving time,
+> this function still returns a result.
+""".
 -spec local_time_to_universal_time(DateTime1) -> DateTime2 when
       DateTime1 :: datetime1970(),
       DateTime2 :: datetime1970().
 local_time_to_universal_time(DateTime) ->
     erlang:localtime_to_universaltime(DateTime).
 
+-doc false.
 -spec local_time_to_universal_time(datetime1970(),
 				   'true' | 'false' | 'undefined') ->
                                           datetime1970().
 local_time_to_universal_time(DateTime, IsDst) ->
     erlang:localtime_to_universaltime(DateTime, IsDst).
 
+-doc """
+Converts from local time to Universal Coordinated Time (UTC). `DateTime1` must
+refer to a local date after Jan 1, 1970.
+
+The return value is a list of 0, 1, or 2 possible UTC times:
+
+- **`[]`** - For a local `{Date1, Time1}` during the period that is skipped when
+  switching _to_ daylight saving time, there is no corresponding UTC, as the
+  local time is illegal (it has never occured).
+
+- **`[DstDateTimeUTC, DateTimeUTC]`** - For a local `{Date1, Time1}` during the
+  period that is repeated when switching _from_ daylight saving time, two
+  corresponding UTCs exist; one for the first instance of the period when
+  daylight saving time is still active, and one for the second instance.
+
+- **`[DateTimeUTC]`** - For all other local times only one corresponding UTC
+  exists.
+""".
 -spec local_time_to_universal_time_dst(DateTime1) -> [DateTime] when
       DateTime1 :: datetime1970(),
       DateTime :: datetime1970().
@@ -323,11 +470,19 @@ local_time_to_universal_time_dst(DateTime) ->
 %% = MilliSec = integer() 
 %% Returns: {date(), time()}, date() = {Y, M, D}, time() = {H, M, S}.
 %% 
+-doc """
+Returns Universal Coordinated Time (UTC) converted from the return value from
+`erlang:timestamp/0`.
+""".
 -spec now_to_datetime(Now) -> datetime1970() when
       Now :: erlang:timestamp().
 now_to_datetime({MSec, Sec, _uSec}) ->
     system_time_to_datetime(MSec*1_000_000 + Sec).
 
+-doc """
+Returns Universal Coordinated Time (UTC) converted from the return value from
+`erlang:timestamp/0`.
+""".
 -spec now_to_universal_time(Now) -> datetime1970() when
       Now :: erlang:timestamp().
 now_to_universal_time(Now) ->
@@ -338,47 +493,99 @@ now_to_universal_time(Now) ->
 %%
 %% Args: Now = now()
 %%
+-doc """
+Returns local date and time converted from the return value from
+`erlang:timestamp/0`.
+""".
 -spec now_to_local_time(Now) -> datetime1970() when
       Now :: erlang:timestamp().
 now_to_local_time({MSec, Sec, _uSec}) ->
     erlang:universaltime_to_localtime(
       now_to_universal_time({MSec, Sec, _uSec})).
 
+-doc(#{equiv => rfc3339_to_system_time(DateTimeString, [])}).
+-doc(#{since => <<"OTP 21.0">>}).
 -spec rfc3339_to_system_time(DateTimeString) -> integer() when
       DateTimeString :: rfc3339_string().
 
 rfc3339_to_system_time(DateTimeString) ->
     rfc3339_to_system_time(DateTimeString, []).
 
+-doc """
+Converts an RFC 3339 timestamp into system time. The data format of RFC 3339
+timestamps is described by [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt).
+Starting from OTP 25.1, the minutes part of the time zone is optional.
+
+Valid option:
+
+- **`{unit, Unit}`** - The time unit of the return value. The default is
+  `second`.
+
+```erlang
+1> calendar:rfc3339_to_system_time("2018-02-01T16:17:58+01:00").
+1517498278
+2> calendar:rfc3339_to_system_time("2018-02-01 15:18:02.088Z",
+   [{unit, nanosecond}]).
+1517498282088000000
+3> calendar:rfc3339_to_system_time(<<"2018-02-01 15:18:02.088Z">>,
+   [{unit, nanosecond}]).
+1517498282088000000
+```
+""".
+-doc(#{since => <<"OTP 21.0">>}).
 -spec rfc3339_to_system_time(DateTimeString, Options) -> integer() when
       DateTimeString :: rfc3339_string(),
       Options :: [Option],
       Option :: {'unit', rfc3339_time_unit()}.
 
-rfc3339_to_system_time(DateTimeString, Options) ->
-    Unit = proplists:get_value(unit, Options, second),
-    %% _T is the character separating the date and the time:
+rfc3339_to_system_time(Bin, Options) when is_binary(Bin) ->
+    rfc3339_to_system_time_bin(Bin, Options);
+rfc3339_to_system_time(List, Options) when is_list(List) ->
+    rfc3339_to_system_time_list(List, Options).
+
+%% _T is the character separating the date and the time:
+rfc3339_to_system_time_bin(
+    <<Year0:4/binary, $-, Month0:2/binary, $-, Day0:2/binary, _T,
+      Hour0:2/binary, $:, Min0:2/binary, $:, Sec0:2/binary, TimeStr/binary>> = DateTimeBin, Options) ->
+    Hour = binary_to_integer(Hour0),
+    Min = binary_to_integer(Min0),
+    Sec = binary_to_integer(Sec0),
+    Year = binary_to_integer(Year0),
+    Month = binary_to_integer(Month0),
+    Day = binary_to_integer(Day0),
+    rfc3339_to_system_time_1(DateTimeBin, Options, Year, Month, Day, Hour, Min, Sec, binary_to_list(TimeStr)).
+
+%% _T is the character separating the date and the time:
+rfc3339_to_system_time_list(
     [Y1, Y2, Y3, Y4, $-, Mon1, Mon2, $-, D1, D2, _T,
-     H1, H2, $:, Min1, Min2, $:, S1, S2 | TimeStr] = DateTimeString,
+     H1, H2, $:, Min1, Min2, $:, S1, S2 | TimeStr] = DateTimeString, Options) ->
     Hour = list_to_integer([H1, H2]),
     Min = list_to_integer([Min1, Min2]),
     Sec = list_to_integer([S1, S2]),
     Year = list_to_integer([Y1, Y2, Y3, Y4]),
     Month = list_to_integer([Mon1, Mon2]),
     Day = list_to_integer([D1, D2]),
+    rfc3339_to_system_time_1(DateTimeString, Options, Year, Month, Day, Hour, Min, Sec, TimeStr).
+
+rfc3339_to_system_time_1(DateTimeIn, Options, Year, Month, Day, Hour, Min, Sec, TimeStr) ->
+    Unit = proplists:get_value(unit, Options, second),
     DateTime = {{Year, Month, Day}, {Hour, Min, Sec}},
     IsFractionChar = fun(C) -> C >= $0 andalso C =< $9 orelse C =:= $. end,
     {FractionStr, UtcOffset} = lists:splitwith(IsFractionChar, TimeStr),
     Time = datetime_to_system_time(DateTime),
     Secs = Time - offset_string_adjustment(Time, second, UtcOffset),
-    check(DateTimeString, Options, Secs),
+    check(DateTimeIn, Options, Secs),
     ScaledEpoch = erlang:convert_time_unit(Secs, second, Unit),
-    ScaledEpoch + copy_sign(fraction(Unit, FractionStr), ScaledEpoch).
+    ScaledEpoch + fraction(Unit, FractionStr).
 
 
 
 %% seconds_to_daystime(Secs) = {Days, {Hour, Minute, Second}}
 %%
+-doc """
+Converts a specified number of seconds into days, hours, minutes, and seconds.
+`Time` is always non-negative, but `Days` is negative if argument `Seconds` is.
+""".
 -spec seconds_to_daystime(Seconds) -> {Days, Time} when
       Seconds :: integer(),
       Days :: integer(),
@@ -399,7 +606,11 @@ seconds_to_daystime(Secs) ->
 %%
 %% Wraps.
 %%
--type secs_per_day() :: 0..?SECONDS_PER_DAY.
+-type secs_per_day() :: 0..86399.
+-doc """
+Computes the time from the specified number of seconds. `Seconds` must be less
+than the number of seconds per day (86400).
+""".
 -spec seconds_to_time(Seconds) -> time() when
       Seconds :: secs_per_day().
 seconds_to_time(Secs) when Secs >= 0, Secs < ?SECONDS_PER_DAY ->
@@ -410,6 +621,8 @@ seconds_to_time(Secs) when Secs >= 0, Secs < ?SECONDS_PER_DAY ->
     Second =  Secs1 rem ?SECONDS_PER_MINUTE,
     {Hour, Minute, Second}.
 
+-doc "Converts a specified system time into local date and time.".
+-doc(#{since => <<"OTP 21.0">>}).
 -spec system_time_to_local_time(Time, TimeUnit) -> datetime() when
       Time :: integer(),
       TimeUnit :: erlang:time_unit().
@@ -418,6 +631,8 @@ system_time_to_local_time(Time, TimeUnit) ->
     UniversalDate = system_time_to_universal_time(Time, TimeUnit),
     erlang:universaltime_to_localtime(UniversalDate).
 
+-doc "Converts a specified system time into universal date and time.".
+-doc(#{since => <<"OTP 21.0">>}).
 -spec system_time_to_universal_time(Time, TimeUnit) -> datetime() when
       Time :: integer(),
       TimeUnit :: erlang:time_unit().
@@ -426,6 +641,8 @@ system_time_to_universal_time(Time, TimeUnit) ->
     Secs = erlang:convert_time_unit(Time, TimeUnit, second),
     system_time_to_datetime(Secs).
 
+-doc(#{equiv => system_time_to_rfc3339(Time, [])}).
+-doc(#{since => <<"OTP 21.0">>}).
 -spec system_time_to_rfc3339(Time) -> DateTimeString when
       Time :: integer(),
       DateTimeString :: rfc3339_string().
@@ -434,12 +651,58 @@ system_time_to_rfc3339(Time) ->
     system_time_to_rfc3339(Time, []).
 
 -type offset() :: [byte()] | (Time :: integer()).
+-doc """
+Converts a system time into an RFC 3339 timestamp.
+
+The data format of RFC 3339 timestamps is described by [RFC 3339].
+The data format of offsets is also described by [RFC 3339].
+
+Valid options:
+
+- **`{offset, Offset}`** - The offset, either a string or an integer, to be
+  included in the formatted string. An empty string, which is the default, is
+  interpreted as local time. A non-empty string is included as is. The time unit
+  of the integer is the same as the one of `Time`.
+
+- **`{time_designator, Character}`** - The character used as time designator,
+  that is, the date and time separator. The default is `$T`.
+
+- **`{unit, Unit}`** - The time unit of `Time`. The default is `second`. If some
+  other unit is given (`millisecond`, `microsecond`, `nanosecond`, or `native`),
+  the formatted string includes a fraction of a second. The number of fractional
+  second digits is three, six, or nine depending on what time unit is chosen.
+  For `native` three fractional digits are included. Notice that trailing zeros
+  are not removed from the fraction.
+
+- **`{return, Return}`** - The desired encoding type for the output,
+  whether a string or a binary is desired. Defaults to string.
+
+```erlang
+1> calendar:system_time_to_rfc3339(erlang:system_time(second)).
+"2018-04-23T14:56:28+02:00"
+2> calendar:system_time_to_rfc3339(erlang:system_time(second),
+   [{offset, "-02:00"}]).
+"2018-04-23T10:56:52-02:00"
+3> calendar:system_time_to_rfc3339(erlang:system_time(second),
+   [{offset, -7200}]).
+"2018-04-23T10:57:05-02:00"
+4> calendar:system_time_to_rfc3339(erlang:system_time(millisecond),
+   [{unit, millisecond}, {time_designator, $\s}, {offset, "Z"}]).
+"2018-04-23 12:57:20.482Z"
+5> calendar:system_time_to_rfc3339(erlang:system_time(millisecond),
+   [{unit, millisecond}, {time_designator, $\s}, {offset, "Z"}, {return, binary}]).
+<<"2018-04-23 12:57:20.482Z">>
+```
+[RFC 3339]: https://www.ietf.org/rfc/rfc3339.txt
+""".
+-doc(#{since => <<"OTP 21.0">>}).
 -spec system_time_to_rfc3339(Time, Options) -> DateTimeString when
       Time :: integer(), % Since Epoch
       Options :: [Option],
       Option :: {'offset', offset()}
               | {'time_designator', byte()}
-              | {'unit', rfc3339_time_unit()},
+              | {'unit', rfc3339_time_unit()}
+              | {'return', 'string' | 'binary'},
       DateTimeString :: rfc3339_string().
 
 system_time_to_rfc3339(Time, Options) ->
@@ -449,10 +712,10 @@ system_time_to_rfc3339(Time, Options) ->
         native ->
             TimeMS = erlang:convert_time_unit(Time, native, millisecond),
             OffsetOpt1 =
-                if is_integer(OffsetOpt0) ->
-                        erlang:convert_time_unit(OffsetOpt0, native,
-                                                 millisecond);
-                   true ->
+                case is_integer(OffsetOpt0) of
+                    true ->
+                        erlang:convert_time_unit(OffsetOpt0, native, millisecond);
+                    false ->
                         OffsetOpt0
                 end,
             system_time_to_rfc3339_do(TimeMS, Options, millisecond, OffsetOpt1);
@@ -467,14 +730,23 @@ system_time_to_rfc3339_do(Time, Options, Unit, OffsetOption) ->
     Adjustment = erlang:convert_time_unit(AdjustmentSecs, second, Unit),
     AdjustedTime = Time + Adjustment,
     Factor = factor(Unit),
-    Secs = AdjustedTime div Factor,
+    Secs0 = AdjustedTime div Factor,
+    Secs = if
+	       AdjustedTime rem Factor < 0 -> Secs0 - 1;
+	       true -> Secs0
+	   end,
     check(Time, Options, Secs),
     DateTime = system_time_to_datetime(Secs),
     {{Year, Month, Day}, {Hour, Min, Sec}} = DateTime,
     FractionStr = fraction_str(Factor, AdjustedTime),
     L = [pad4(Year), "-", pad2(Month), "-", pad2(Day), [T],
          pad2(Hour), ":", pad2(Min), ":", pad2(Sec), FractionStr, Offset],
-    lists:append(L).
+    case proplists:get_value(return, Options, string) of
+        string ->
+            lists:append(L);
+        binary ->
+            iolist_to_binary(L)
+    end.
 
 %% time_difference(T1, T2) = Tdiff
 %%
@@ -484,6 +756,15 @@ system_time_to_rfc3339_do(Time, Options, Unit, OffsetOption) ->
 %% Date = {Year, Month, Day}, Time = {Hour, Minute, Sec},
 %% Year = Month = Day = Hour = Minute = Sec = integer()
 %%
+-doc """
+Returns the difference between two `{Date, Time}` tuples. `T2` is to refer to an
+epoch later than `T1`.
+
+> #### Warning {: .warning }
+>
+> This function is obsolete. Use the conversion functions for gregorian days and
+> seconds instead.
+""".
 -spec time_difference(T1, T2) -> {Days, Time} when
       T1 :: datetime(),
       T2 :: datetime(),
@@ -499,6 +780,7 @@ time_difference({{Y1, Mo1, D1}, {H1, Mi1, S1}},
 %%
 %% time_to_seconds(Time)
 %%
+-doc "Returns the number of seconds since midnight up to the specified time.".
 -spec time_to_seconds(Time) -> secs_per_day() when
       Time :: time().
 time_to_seconds({H, M, S}) when is_integer(H), is_integer(M), is_integer(S) ->
@@ -509,6 +791,10 @@ time_to_seconds({H, M, S}) when is_integer(H), is_integer(M), is_integer(S) ->
 %% universal_time()
 %%
 %% Returns: {date(), time()}, date() = {Y, M, D}, time() = {H, M, S}.
+-doc """
+Returns the Universal Coordinated Time (UTC) reported by the underlying
+operating system. Returns local time if universal time is unavailable.
+""".
 -spec universal_time() -> datetime().
 universal_time() ->
     erlang:universaltime().
@@ -516,6 +802,10 @@ universal_time() ->
 
 %% universal_time_to_local_time(DateTime)
 %%
+-doc """
+Converts from Universal Coordinated Time (UTC) to local time. `DateTime` must
+refer to a date after Jan 1, 1970.
+""".
 -spec universal_time_to_local_time(DateTime) -> datetime() when
       DateTime :: datetime1970().
 universal_time_to_local_time(DateTime) ->
@@ -525,6 +815,7 @@ universal_time_to_local_time(DateTime) ->
 %% valid_date(Year, Month, Day) = true | false
 %% valid_date({Year, Month, Day}) = true | false
 %%
+-doc(#{equiv => valid_date({Year, Month, Day})}).
 -spec valid_date(Year, Month, Day) -> boolean() when
       Year :: integer(),
       Month :: integer(),
@@ -538,6 +829,7 @@ valid_date1(Y, M, D) when Y >= 0, M > 0, M < 13, D > 0 ->
 valid_date1(_, _, _) ->
     false.
 
+-doc "This function checks if a date is a valid.".
 -spec valid_date(Date) -> boolean() when
       Date :: date().
 valid_date({Y, M, D}) ->
@@ -718,9 +1010,14 @@ offset_string_adjustment(_Time, _Unit, "Z") ->
 offset_string_adjustment(_Time, _Unit, "z") ->
     0;
 offset_string_adjustment(_Time, _Unit, Tz) ->
-    [Sign, H1, H2, $:, M1, M2] = Tz,
+    [Sign, H1, H2 | MinutesDiff] = Tz,
     Hour = list_to_integer([H1, H2]),
-    Min = list_to_integer([M1, M2]),
+    Min = case MinutesDiff of
+              [$:, M1, M2] ->
+                  list_to_integer([M1, M2]);
+              [] ->
+                  0
+          end,
     Adjustment = 3600 * Hour + 60 * Min,
     case Sign of
         $- -> -Adjustment;
@@ -735,11 +1032,17 @@ local_offset(SystemTime, Unit) ->
     UniversalSecs = datetime_to_gregorian_seconds(UniversalTime),
     LocalSecs - UniversalSecs.
 
+mod(N, D) ->
+    case N rem D of
+	R when R < 0 -> mod(R + D, D);
+	R -> R
+    end.
+
 fraction_str(1, _Time) ->
     "";
 fraction_str(Factor, Time) ->
-    Fraction = Time rem Factor,
-    S = integer_to_list(abs(Fraction)),
+    Fraction = mod(Time, Factor),
+    S = integer_to_list(Fraction),
     [$. | pad(log10(Factor) - length(S), S)].
 
 fraction(second, _) ->
@@ -748,9 +1051,6 @@ fraction(_, "") ->
     0;
 fraction(Unit, FractionStr) ->
     round(factor(Unit) * list_to_float([$0|FractionStr])).
-
-copy_sign(N1, N2) when N2 < 0 -> -N1;
-copy_sign(N1, _N2) -> N1.
 
 factor(second)      -> 1;
 factor(millisecond) -> 1000;

@@ -25,9 +25,11 @@
 %% @doc Test running functionality
 
 -module(eunit_test).
+-moduledoc false.
 
 -export([run_testfun/1, mf_wrapper/2, enter_context/4, multi_setup/1]).
 
+-compile(nowarn_unexported_function).
 
 -include("eunit.hrl").
 -include("eunit_internal.hrl").

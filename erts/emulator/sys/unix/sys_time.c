@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2005-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2005-2024. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,6 @@
 
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
-#endif
-
-/* These need to be undef:ed to not break activation of
- * micro level process accounting on /proc/self 
- */
-#ifdef _LARGEFILE_SOURCE
-#  undef _LARGEFILE_SOURCE
-#endif
-#ifdef _FILE_OFFSET_BITS
-#  undef _FILE_OFFSET_BITS
 #endif
 
 #include <stdlib.h>
@@ -219,7 +209,7 @@ sys_init_time(ErtsSysInitTimeResult *init_resp)
 #endif
 
     init_resp->os_monotonic_time_info.resolution = (Uint64) 1000*1000*1000;
-#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(MONOTONIC_CLOCK_ID)
+#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(OS_MONOTONIC_TIME_USING_MACH_CLOCK_GET_TIME)
     init_resp->os_monotonic_time_info.resolution
 	= mach_clock_getres(&internal_state.r.o.mach.clock.monotonic);
 #elif defined(HAVE_CLOCK_GETRES) && defined(MONOTONIC_CLOCK_ID)
@@ -379,7 +369,7 @@ sys_init_time(ErtsSysInitTimeResult *init_resp)
 
     init_resp->os_system_time_info.locked_use = 0;
     init_resp->os_system_time_info.resolution = (Uint64) 1000*1000*1000;
-#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(WALL_CLOCK_ID)
+#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(OS_SYSTEM_TIME_USING_MACH_CLOCK_GET_TIME)
     init_resp->os_system_time_info.resolution
 	= mach_clock_getres(&internal_state.r.o.mach.clock.wall);
 #elif defined(HAVE_CLOCK_GETRES) && defined(WALL_CLOCK_ID)

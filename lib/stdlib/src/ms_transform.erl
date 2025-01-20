@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,9 @@
 %% %CopyrightEnd%
 %%
 -module(ms_transform).
+-moduledoc({file, "../doc/src/ms_transform.md"}).
+
+-compile(nowarn_deprecated_catch).
 
 -export([format_error/1,transform_from_shell/3,
          parse_transform/2,parse_transform_info/0]).
@@ -69,6 +72,10 @@
 %% Called by compiler or ets/dbg:fun2ms when errors/warnings occur
 %%
 
+-doc """
+Takes an error code returned by one of the other functions in the module and
+creates a textual description of the error.
+""".
 -spec(format_error(Error) -> Chars when
       Error :: {error, module(), term()},
       Chars :: io_lib:chars()).
@@ -190,6 +197,7 @@ format_error({?ERR_BODYMULTIFIELD,RName,FName}) ->
 format_error(Else) ->
     lists:flatten(io_lib:format("Unknown error code ~tw",[Else])).
 
+-doc false.
 -spec parse_transform_info() -> #{'error_location' => 'column'}.
 
 parse_transform_info() ->
@@ -199,6 +207,13 @@ parse_transform_info() ->
 %% Called when translating in shell
 %%
 
+-doc """
+Implements the transformation when the `fun2ms/1` functions are called from the
+shell. In this case, the abstract form is for one single fun (parsed by the
+Erlang shell). All imported variables are to be in the key-value list passed as
+`BoundEnvironment`. The result is a term, normalized, that is, not in abstract
+format.
+""".
 -spec transform_from_shell(Dialect, Clauses, BoundEnvironment) -> term() when
       Dialect :: ets | dbg,
       Clauses :: [erl_parse:abstract_clause()],
@@ -230,6 +245,17 @@ transform_from_shell(Dialect, Clauses, BoundEnvironment) ->
 %% Called when translating during compiling
 %%
 
+-doc """
+Implements the transformation at compile time. This function is called by the
+compiler to do the source code transformation if and when header file
+`ms_transform.hrl` is included in the source code.
+
+For information about how to use this parse transformation, see `m:ets` and
+`dbg:fun2ms/1`.
+
+For a description of match specifications, see section
+[Match Specification in Erlang](`e:erts:match_spec.md`) in ERTS User's Guide.
+""".
 -spec parse_transform(Forms, Options) -> Forms2 | Errors | Warnings when
       Forms :: [erl_parse:abstract_form() | erl_parse:form_info()],
       Forms2 :: [erl_parse:abstract_form() | erl_parse:form_info()],
@@ -756,7 +782,12 @@ tg({bin_element,Anno,X,Y,Z},B) ->
 
 tg({bin,Anno,List},B) ->
     {bin,Anno,[tg(X,B) || X <- List]};
-    
+
+tg({map_field_assoc, Anno, Field, Value}, B) ->
+    {map_field_assoc, Anno, tg(Field, B), tg(Value, B)};
+tg({map, Anno, List}, B) ->
+    {map, Anno, [tg(X, B) || X <- List]};
+
 tg(T,B) when is_tuple(T), tuple_size(T) >= 2 ->
     Element = element(1,T),
     Anno = element(2,T),
@@ -858,6 +889,9 @@ th({var,Anno,Name},B,OB) ->
 	Trans ->
 	    {{atom,Anno,Trans},B}
     end;
+th({map_field_exact,Anno,Field,Value},B,OB) ->
+    {[NField, NValue], NB} = th([Field, Value], B, OB),
+    {{map_field_assoc,Anno,NField,NValue}, NB};
 th([H|T],B,OB) ->
     {NH,NB} = th(H,B,OB),
     {NT,NNB} = th(T,NB,OB),
@@ -969,6 +1003,8 @@ real_guard_function(abs,1) -> true;
 real_guard_function(element,2) -> true;
 real_guard_function(hd,1) -> true;
 real_guard_function(length,1) -> true;
+real_guard_function(max,2) -> true;
+real_guard_function(min,2) -> true;
 real_guard_function(node,0) -> true;
 real_guard_function(node,1) -> true;
 real_guard_function(round,1) -> true;
@@ -1007,6 +1043,9 @@ action_function(set_tcw,1) -> true;
 action_function(silent,1) -> true;
 action_function(trace,2) -> true;
 action_function(trace,3) -> true;
+action_function(caller_line,0) -> true;
+action_function(current_stacktrace,0) -> true;
+action_function(current_stacktrace,1) -> true;
 action_function(_,_) -> false.
 
 bool_operator('and',2) ->
@@ -1126,7 +1165,7 @@ normalise({bin,_,Fs}) ->
 	eval_bits:expr_grp(Fs, [],
 			   fun(E, _) ->
 				   {value, normalise(E), []}
-			   end, [], true),
+			   end),
     B;
 normalise({cons,_,Head,Tail}) ->
     [normalise(Head)|normalise(Tail)];
@@ -1134,12 +1173,11 @@ normalise({op,_,'++',A,B}) ->
     normalise(A) ++ normalise(B);
 normalise({tuple,_,Args}) ->
     list_to_tuple(normalise_list(Args));
-normalise({map,_,Pairs0}) ->
-    Pairs1 = lists:map(fun ({map_field_exact,_,K,V}) ->
-                               {normalise(K),normalise(V)}
-                       end,
-                       Pairs0),
-    maps:from_list(Pairs1);
+normalise({map,_,Pairs}) ->
+    maps:from_list(lists:map(fun
+		%% only allow '=>'
+		({map_field_assoc,_,K,V}) -> {normalise(K),normalise(V)}
+	    end, Pairs));
 %% Special case for unary +/-.
 normalise({op,_,'+',{char,_,I}}) -> I;
 normalise({op,_,'+',{integer,_,I}}) -> I;

@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2020-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2020-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ void BeamGlobalAssembler::emit_check_float_error() {
     a.fabs(a64::d30, a64::d0);
     a.ldr(a64::d31, arm::Mem(double_max));
     a.fcmp(a64::d30, a64::d31);
-    a.cond_hi().b(error);
+    a.b_hi(error);
     a.ret(a64::x30);
 
     a.align(AlignMode::kCode, 8);
@@ -51,9 +51,9 @@ void BeamGlobalAssembler::emit_check_float_error() {
 }
 
 void BeamModuleAssembler::emit_float_instr(uint32_t instId,
-                                           const ArgVal &LHS,
-                                           const ArgVal &RHS,
-                                           const ArgVal &Dst) {
+                                           const ArgFRegister &LHS,
+                                           const ArgFRegister &RHS,
+                                           const ArgFRegister &Dst) {
     auto lhs = load_source(LHS, a64::d0);
     auto rhs = load_source(RHS, a64::d1);
     auto dst = init_destination(Dst, a64::d2);
@@ -66,16 +66,18 @@ void BeamModuleAssembler::emit_float_instr(uint32_t instId,
 
 /* * * * */
 
-void BeamModuleAssembler::emit_fload(const ArgVal &Src, const ArgVal &Dst) {
+void BeamModuleAssembler::emit_fload(const ArgSource &Src,
+                                     const ArgFRegister &Dst) {
     auto src = load_source(Src, TMP1);
     auto dst = init_destination(Dst, a64::d0);
-    arm::Gp float_ptr = emit_ptr_val(TMP1, src.reg);
+    a64::Gp float_ptr = emit_ptr_val(TMP1, src.reg);
 
     a.ldur(dst.reg, emit_boxed_val(float_ptr, sizeof(Eterm)));
     flush_var(dst);
 }
 
-void BeamModuleAssembler::emit_fstore(const ArgVal &Src, const ArgVal &Dst) {
+void BeamModuleAssembler::emit_fstore(const ArgFRegister &Src,
+                                      const ArgRegister &Dst) {
     auto src = load_source(Src, a64::d0);
     auto dst = init_destination(Dst, TMP1);
 
@@ -104,7 +106,7 @@ void BeamGlobalAssembler::emit_fconv_shared() {
         mov_imm(TMP2, _TAG_HEADER_MASK - _BIG_SIGN_BIT);
         a.and_(TMP2, TMP1, TMP2);
         a.cmp(TMP2, imm(_TAG_HEADER_POS_BIG));
-        a.cond_ne().b(error);
+        a.b_ne(error);
     }
 
     emit_enter_runtime_frame();
@@ -112,7 +114,7 @@ void BeamGlobalAssembler::emit_fconv_shared() {
 
     /* ARG1 already contains the source term. */
     lea(ARG2, TMP_MEM1q);
-    runtime_call<2>(big_to_double);
+    runtime_call<int (*)(Eterm, double *), big_to_double>();
 
     emit_leave_runtime();
     emit_leave_runtime_frame();
@@ -131,16 +133,25 @@ void BeamGlobalAssembler::emit_fconv_shared() {
     }
 }
 
-void BeamModuleAssembler::emit_fconv(const ArgVal &Src, const ArgVal &Dst) {
-    Label next = a.newLabel(), not_small = a.newLabel(),
-          fallback = a.newLabel();
-
+void BeamModuleAssembler::emit_fconv(const ArgSource &Src,
+                                     const ArgFRegister &Dst) {
     auto dst = init_destination(Dst, a64::d0);
     auto src = load_source(Src, ARG1);
 
+    if (always_small(Src)) {
+        comment("skipped test for small operand since it is always small");
+        a.asr(TMP1, src.reg, imm(_TAG_IMMED1_SIZE));
+        a.scvtf(dst.reg, TMP1);
+        flush_var(dst);
+        return;
+    }
+
+    Label next = a.newLabel(), not_small = a.newLabel(),
+          fallback = a.newLabel();
+
     a.and_(TMP1, src.reg, imm(_TAG_IMMED1_MASK));
     a.cmp(TMP1, imm(_TAG_IMMED1_MASK));
-    a.cond_ne().b(not_small);
+    a.b_ne(not_small);
 
     a.asr(TMP1, src.reg, imm(_TAG_IMMED1_SIZE));
     a.scvtf(dst.reg, TMP1);
@@ -148,12 +159,12 @@ void BeamModuleAssembler::emit_fconv(const ArgVal &Src, const ArgVal &Dst) {
 
     a.bind(not_small);
     {
-        if (masked_types(Src, BEAM_TYPE_FLOAT) == BEAM_TYPE_NONE) {
+        if (never_one_of<BeamTypeId::Float>(Src)) {
             comment("skipped float path since source cannot be a float");
         } else {
             /* If the source is always a number, we can skip the box test when
              * it's not a small. */
-            if (always_one_of(Src, BEAM_TYPE_FLOAT | BEAM_TYPE_INTEGER)) {
+            if (always_one_of<BeamTypeId::Number>(Src)) {
                 comment("skipped box test since source is always a number");
             } else {
                 emit_is_boxed(fallback, Src, src.reg);
@@ -167,7 +178,7 @@ void BeamModuleAssembler::emit_fconv(const ArgVal &Src, const ArgVal &Dst) {
 
             a.ldr(TMP1, arm::Mem(TMP1));
             a.cmp(TMP1, imm(HEADER_FLONUM));
-            a.cond_eq().b(next);
+            a.b_eq(next);
         }
 
         a.bind(fallback);
@@ -182,36 +193,38 @@ void BeamModuleAssembler::emit_fconv(const ArgVal &Src, const ArgVal &Dst) {
     flush_var(dst);
 }
 
-void BeamModuleAssembler::emit_i_fadd(const ArgVal &LHS,
-                                      const ArgVal &RHS,
-                                      const ArgVal &Dst) {
+void BeamModuleAssembler::emit_i_fadd(const ArgFRegister &LHS,
+                                      const ArgFRegister &RHS,
+                                      const ArgFRegister &Dst) {
     emit_float_instr(a64::Inst::kIdFadd_v, LHS, RHS, Dst);
 }
 
-void BeamModuleAssembler::emit_i_fsub(const ArgVal &LHS,
-                                      const ArgVal &RHS,
-                                      const ArgVal &Dst) {
+void BeamModuleAssembler::emit_i_fsub(const ArgFRegister &LHS,
+                                      const ArgFRegister &RHS,
+                                      const ArgFRegister &Dst) {
     emit_float_instr(a64::Inst::kIdFsub_v, LHS, RHS, Dst);
 }
 
-void BeamModuleAssembler::emit_i_fmul(const ArgVal &LHS,
-                                      const ArgVal &RHS,
-                                      const ArgVal &Dst) {
+void BeamModuleAssembler::emit_i_fmul(const ArgFRegister &LHS,
+                                      const ArgFRegister &RHS,
+                                      const ArgFRegister &Dst) {
     emit_float_instr(a64::Inst::kIdFmul_v, LHS, RHS, Dst);
 }
 
-void BeamModuleAssembler::emit_i_fdiv(const ArgVal &LHS,
-                                      const ArgVal &RHS,
-                                      const ArgVal &Dst) {
+void BeamModuleAssembler::emit_i_fdiv(const ArgFRegister &LHS,
+                                      const ArgFRegister &RHS,
+                                      const ArgFRegister &Dst) {
     emit_float_instr(a64::Inst::kIdFdiv_v, LHS, RHS, Dst);
 }
 
-void BeamModuleAssembler::emit_i_fnegate(const ArgVal &Src, const ArgVal &Dst) {
+void BeamModuleAssembler::emit_i_fnegate(const ArgFRegister &Src,
+                                         const ArgFRegister &Dst) {
     auto src = load_source(Src, a64::d0);
     auto dst = init_destination(Dst, a64::d1);
 
+    /* Note that there is no need to check for errors since flipping the sign
+     * of a finite float is guaranteed to produce a finite float. */
     a.fneg(a64::d0, src.reg);
-    fragment_call(ga->get_check_float_error());
     a.mov(dst.reg, a64::d0);
     flush_var(dst);
 }

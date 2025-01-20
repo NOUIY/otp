@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2018-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2018-2023. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,7 @@ ml_get_key(ErtsMonLnkNode *mln)
     case ERTS_MON_TYPE_PROC:
     case ERTS_MON_TYPE_PORT:
     case ERTS_MON_TYPE_DIST_PROC:
+    case ERTS_MON_TYPE_DIST_PORT:
     case ERTS_MON_TYPE_TIME_OFFSET:
     case ERTS_MON_TYPE_RESOURCE: {
         ErtsMonitorData *mdp = erts_monitor_to_data(mln);
@@ -702,10 +703,15 @@ erts_debug_monitor_tree_destroying_foreach(ErtsMonitor *root,
                                            void *arg,
                                            void *vysp)
 {
-    void *tmp_vysp = erts_alloc(ERTS_ALC_T_ML_YIELD_STATE,
-                                sizeof(ErtsMonLnkYieldState));
+    void *tmp_vysp;
     Sint reds;
-    sys_memcpy(tmp_vysp, tmp_vysp, sizeof(ErtsMonLnkYieldState));
+    if (!vysp)
+        tmp_vysp = NULL;
+    else {
+        tmp_vysp = erts_alloc(ERTS_ALC_T_ML_YIELD_STATE,
+                              sizeof(ErtsMonLnkYieldState));
+        sys_memcpy(tmp_vysp, tmp_vysp, sizeof(ErtsMonLnkYieldState));
+    }
     do {
         reds = ml_rbt_foreach_yielding((ErtsMonLnkNode *) root,
                                        (ErtsMonLnkNodeFunc) func,
@@ -888,8 +894,10 @@ erts_monitor_create(Uint16 type, Eterm ref, Eterm orgn, Eterm trgt, Eterm name, 
             mdp->u.target.type = type;
             erts_atomic32_init_nob(&mdp->refc, 2);
             break;
-        }
+        } /* end of "if (is_nil(name))"" */
+        ERTS_FALLTHROUGH();
     case ERTS_MON_TYPE_DIST_PROC:
+    case ERTS_MON_TYPE_DIST_PORT:
     case ERTS_MON_TYPE_RESOURCE:
     case ERTS_MON_TYPE_NODE:
     case ERTS_MON_TYPE_NODES: {
@@ -1202,7 +1210,8 @@ erts_monitor_size(ErtsMonitor *mon)
             && mon->type != ERTS_MON_TYPE_NODES) {
             if (!is_immed(mdep->md.ref))
                 hsz += NC_HEAP_SIZE(mdep->md.ref);
-            if (mon->type == ERTS_MON_TYPE_DIST_PROC) {
+            if (mon->type == ERTS_MON_TYPE_DIST_PROC
+                || mon->type == ERTS_MON_TYPE_DIST_PORT) {
                 if (!is_immed(mdep->md.origin.other.item))
                     hsz += NC_HEAP_SIZE(mdep->md.origin.other.item);
                 if (!is_immed(mdep->md.u.target.other.item))
@@ -1335,10 +1344,15 @@ erts_debug_link_tree_destroying_foreach(ErtsLink *root,
                                         void *arg,
                                         void *vysp)
 {
-    void *tmp_vysp = erts_alloc(ERTS_ALC_T_ML_YIELD_STATE,
-                                sizeof(ErtsMonLnkYieldState));
+    void *tmp_vysp;
     Sint reds;
-    sys_memcpy(tmp_vysp, vysp, sizeof(ErtsMonLnkYieldState));
+    if (!vysp)
+        tmp_vysp = NULL;
+    else {
+        tmp_vysp = erts_alloc(ERTS_ALC_T_ML_YIELD_STATE,
+                              sizeof(ErtsMonLnkYieldState));
+        sys_memcpy(tmp_vysp, vysp, sizeof(ErtsMonLnkYieldState));
+    }
     do {
         reds = ml_rbt_foreach_yielding((ErtsMonLnkNode *) root,
                                        (ErtsMonLnkNodeFunc) func,

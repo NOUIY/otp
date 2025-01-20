@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2007-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2023. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,21 +34,20 @@ suite() -> [{ct_hooks,[ts_install_cth]},
 	    {timetrap, {seconds, 30}}].
 
 all() -> 
-    [uri_too_long_414, 
-     header_too_long_413,
-     entity_too_long,
-     http_0_9_not_supported,
-     erl_script_nocache_opt,
-     script_nocache,
-     escaped_url_in_error_body,
-     script_timeout,
-     slowdose,
-     keep_alive_timeout,
-     invalid_rfc1123_date
-    ].
+    [{group, httpd_basic}].
 
 groups() -> 
-    [].
+    [{httpd_basic, [parallel], [uri_too_long_414,
+                                header_too_long_413,
+                                entity_too_long,
+                                http_0_9_not_supported,
+                                erl_script_nocache_opt,
+                                script_nocache,
+                                escaped_url_in_error_body,
+                                script_timeout,
+                                slowdose,
+                                keep_alive_timeout,
+                                invalid_rfc1123_date]}].
 
 init_per_group(_GroupName, Config) ->
     Config.
@@ -85,7 +84,7 @@ DUMMY
     DummyFile = filename:join([PrivDir,"dummy.html"]),
     CgiDir =  filename:join(PrivDir, "cgi-bin"),
     ok = file:make_dir(CgiDir),
-    {CgiPrintEnv, CgiSleep} = case test_server:os_type() of
+    {CgiPrintEnv, CgiSleep} = case os:type() of
 				  {win32, _} ->
 				      {"printenv.bat", "cgi_sleep.exe"};
 				  _ ->
