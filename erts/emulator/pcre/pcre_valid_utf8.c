@@ -131,6 +131,7 @@ else {
     if (ystate->yielded) {
         p = ystate->p;
         length = ystate->length;
+        ystate->yielded = 0;
         if (length < 0) 
             goto restart_length;
         else
@@ -219,7 +220,7 @@ for (p = string; length-- > 0; p++)
   switch (ab)
     {
     /* 2-byte character. No further bytes to check for 0x80. Check first byte
-    for for xx00 000x (overlong sequence). */
+    for xx00 000x (overlong sequence). */
 
     case 1: if ((c & 0x3e) == 0)
       {
@@ -251,7 +252,7 @@ for (p = string; length-- > 0; p++)
     break;
 
     /* 4-byte character. Check 3rd and 4th bytes for 0x80. Then check first 2
-       bytes for for 1111 0000, xx00 xxxx (overlong sequence), then check for a
+       bytes for 1111 0000, xx00 xxxx (overlong sequence), then check for a
        character greater than 0x0010ffff (f4 8f bf bf) */
 
     case 3:

@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2010-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2010-2022. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -884,7 +884,7 @@ enqueue_mtx(ethr_mutex *mtx, ethr_ts_event *tse_start, ethr_ts_event *tse_end)
      * is not currently locked by current thread, we almost certainly have a
      * hard to debug race condition. There might however be some (strange)
      * use for it. POSIX also allow a call to `pthread_cond_signal' or
-     * `pthread_cond_broadcast' even though the the associated mutex isn't
+     * `pthread_cond_broadcast' even though the associated mutex isn't
      * locked by the caller. Therefore, we also allow this kind of strange
      * usage, but optimize for the case where the mutex is locked by the
      * calling thread.
@@ -2657,6 +2657,7 @@ ethr_rwmutex_init_opt(ethr_rwmutex *rwmtx, ethr_rwmutex_opt *opt)
 	    rwmtx->type = ETHR_RWMUTEX_TYPE_EXTREMELY_FREQUENT_READ;
 	}
 	/* Fall through */
+        ETHR_FALLTHROUGH();
     case ETHR_RWMUTEX_TYPE_EXTREMELY_FREQUENT_READ: {
 	int length;
 
@@ -2688,6 +2689,7 @@ ethr_rwmutex_init_opt(ethr_rwmutex *rwmtx, ethr_rwmutex_opt *opt)
 	    break;
 	}
     }
+        ETHR_FALLTHROUGH();
     case ETHR_RWMUTEX_TYPE_NORMAL:
 	rwmtx->tdata.rs = 0;
 	break;

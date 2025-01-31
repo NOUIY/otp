@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1997-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1997-2024. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,12 +75,6 @@
  * Various configuration options, used to be in the Makefile.
  */
 
-#define NO_ASINH
-#define NO_ACOSH
-#define NO_ATANH
-#define NO_ERF
-#define NO_ERFC
-
 #define NO_SYSCONF
 #define NO_DAEMON
 #define NO_PWD
@@ -135,11 +129,10 @@ struct tm *sys_localtime_r(time_t *epochs, struct tm *ptm);
 struct tm *sys_gmtime_r(time_t *epochs, struct tm *ptm);
 time_t sys_mktime( struct tm *ptm);
 
-#define localtime_r sys_localtime_r
-#define HAVE_LOCALTIME_R 1
 #define gmtime_r sys_gmtime_r
 #define HAVE_GMTIME_R
 #define mktime sys_mktime
+extern int sys_daylight;
 
 typedef struct {
     erts_time_t tv_sec;

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1997-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2022. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -189,7 +189,15 @@ init_per_suite(Config) ->
 
 end_per_suite(_Config) ->
     logger:remove_handler_filter(default, checkio_filter),
-    catch erts_debug:set_internal_state(available_internal_state, false).
+    catch erts_debug:set_internal_state(available_internal_state, false),
+
+    case nodes(connected) of
+        [] -> ok;
+        Nodes ->
+            [net_kernel:disconnect(N) || N <- Nodes],
+            io:format("LEAKED connections: ~p\n", [Nodes])
+    end.
+
 
 init_per_group(poll_thread, Config) ->
     [{node_args, ["+IOt", "2"]} | Config];
@@ -256,7 +264,7 @@ end_per_testcase(Case, Config) ->
     ok.
 
 ct_os_cmd(Cmd) ->
-    ct:log("~s: ~s",[Cmd,os:cmd(Cmd)]).
+    ct:log("~s: ~ts",[Cmd,os:cmd(Cmd)]).
 
 %% Test sending bad types to port with an outputv-capable driver.
 outputv_errors(Config) when is_list(Config) ->
@@ -2102,7 +2110,6 @@ async_blast(Config) when is_list(Config) ->
     AsyncBlastTime = timer:now_diff(End,Start)/1000000,
     ct:log("AsyncBlastTime=~p~n", [AsyncBlastTime]),
     MemBefore = MemAfter,
-    ct:log({async_blast_time, AsyncBlastTime}),
     ok.
 
 thr_msg_blast_receiver(_Port, N, N) ->
@@ -2524,8 +2531,9 @@ check_io_debug() ->
 has_gethost() ->
     has_gethost(erlang:ports()).
 has_gethost([P|T]) ->
-    case erlang:port_info(P, name) of
-        {name,"inet_gethost"++_} ->
+    {name, Name} = erlang:port_info(P, name),
+    case filename:basename(Name) of
+        "inet_gethost"++_ ->
             true;
         _ ->
             has_gethost(T)
@@ -2613,7 +2621,7 @@ make_refc_binaries(Term) ->
     transform_bins(F, Term).
 
 build_binary(Elements) ->
-    list_to_binary(build_list(Elements)).
+    rand:bytes(Elements).
 
 build_list(Elements) -> build_list(Elements, []).
 

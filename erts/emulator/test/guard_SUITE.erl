@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 	 type_tests/1,guard_bif_binary_part/1]).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 -export([init/3]).
 -import(lists, [member/2]).
@@ -55,6 +56,19 @@ bad_tuple(Config) when is_list(Config) ->
     error = bad_tuple1({a, b}),
     x = bad_tuple1({x, b}),
     y = bad_tuple1({a, b, y}),
+
+    ?assertError(badarg, int_to_atom_1(-1)),
+    ?assertError(badarg, int_to_atom_1(0)),
+    ?assertError(badarg, int_to_atom_1(4)),
+    ?assertError(badarg, int_to_atom_1(4.2)),
+    ?assertError(badarg, int_to_atom_1(x)),
+
+    ?assertError(badarg, int_to_atom_2(-1)),
+    ?assertError(badarg, int_to_atom_2(0)),
+    ?assertError(badarg, int_to_atom_2(4)),
+    ?assertError(badarg, int_to_atom_2(3.0)),
+    ?assertError(badarg, int_to_atom_2(x)),
+
     ok.
 
 bad_tuple1(T) when element(1, T) == x ->
@@ -63,6 +77,22 @@ bad_tuple1(T) when element(3, T) == y ->
     y;
 bad_tuple1(_) ->
     error.
+
+int_to_atom_1(N) ->
+    if
+        is_integer(N) ->
+            element(N, {a,b,c});
+        true ->
+            element(N, {a,b,c})
+    end.
+
+int_to_atom_2(N0) ->
+    case id(N0) of
+        N when is_integer(N) ->
+            element(N, {a,b,c});
+        Other ->
+            element(Other, {a,b,c})
+    end.
 
 test_heap_guards(Config) when is_list(Config) ->
     ct:timetrap({minutes, 2}),
@@ -391,6 +421,18 @@ guard_bifs(Config) when is_list(Config) ->
     try_fail_gbif('node/0', 0, xxxx),
     try_fail_gbif('node/1', self(), xxx),
     try_fail_gbif('node/1', yyy, xxx),
+
+    {'EXIT', {function_clause, _}} = catch gh_6634({a,b}),
+    {'EXIT', {function_clause, _}} = catch gh_6634(42),
+
+    ok.
+
+gh_6634(X) when is_tuple(X) andalso not ok ->
+    %% `not ok` would be translated to an is_eq_exact instruction,
+    %% which the JIT would not handle correctly because it had two
+    %% immediate operands. In a release build incorrect code would be
+    %% generated, which might crash the runtime system; in a debug
+    %% build an assertion would fire at load time.
     ok.
 
 try_gbif(Id, X, Y) ->

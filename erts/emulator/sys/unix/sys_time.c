@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2005-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2005-2024. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,6 @@
 
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
-#endif
-
-/* These need to be undef:ed to not break activation of
- * micro level process accounting on /proc/self 
- */
-#ifdef _LARGEFILE_SOURCE
-#  undef _LARGEFILE_SOURCE
-#endif
-#ifdef _FILE_OFFSET_BITS
-#  undef _FILE_OFFSET_BITS
 #endif
 
 #include <stdlib.h>
@@ -114,6 +104,10 @@ static void clock_gettime_times_raw(ErtsMonotonicTime *, ErtsSystemTime *);
 #endif
 
 #endif /* defined(__linux__) && defined(OS_MONOTONIC_TIME_USING_CLOCK_GETTIME) */
+
+#if !HAVE_DECL_DAYLIGHT
+int sys_daylight = -1;
+#endif
 
 #ifdef ERTS_MACH_CLOCKS
 #  define ERTS_SYS_TIME_INTERNAL_STATE_READ_ONLY__
@@ -206,6 +200,30 @@ sys_init_time(ErtsSysInitTimeResult *init_resp)
 #if defined(ERTS_MACH_CLOCKS)
     mach_clocks_init();
 #endif
+#if !HAVE_DECL_DAYLIGHT
+    /* If the system does not have the daylight variable,
+       we create it by looping through the current year
+       in the current timezone and check if isdst ever
+       changes. */
+    time_t the_clock = time(NULL);
+    struct tm *tm, tmbuf;
+    tm = sys_localtime_r(&the_clock, &tmbuf);
+    tm->tm_hour = 0;
+    tm->tm_min = 0;
+    tm->tm_sec = 0;
+    tm->tm_mday = 1;
+    sys_daylight = 0;
+    for (int i = 0; i < 12; i++) {
+        struct tm *local_tm, local_tmbuf;
+        tm->tm_mon = i;
+        the_clock = mktime(tm);
+        local_tm = sys_localtime_r(&the_clock, &local_tmbuf);
+        if (local_tm->tm_isdst) {
+            sys_daylight = 1;
+            break;
+        }
+    }
+#endif
 #if !defined(ERTS_HAVE_OS_MONOTONIC_TIME_SUPPORT)
 
     init_resp->have_os_monotonic_time = 0;
@@ -219,7 +237,7 @@ sys_init_time(ErtsSysInitTimeResult *init_resp)
 #endif
 
     init_resp->os_monotonic_time_info.resolution = (Uint64) 1000*1000*1000;
-#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(MONOTONIC_CLOCK_ID)
+#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(OS_MONOTONIC_TIME_USING_MACH_CLOCK_GET_TIME)
     init_resp->os_monotonic_time_info.resolution
 	= mach_clock_getres(&internal_state.r.o.mach.clock.monotonic);
 #elif defined(HAVE_CLOCK_GETRES) && defined(MONOTONIC_CLOCK_ID)
@@ -379,7 +397,7 @@ sys_init_time(ErtsSysInitTimeResult *init_resp)
 
     init_resp->os_system_time_info.locked_use = 0;
     init_resp->os_system_time_info.resolution = (Uint64) 1000*1000*1000;
-#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(WALL_CLOCK_ID)
+#if defined(ERTS_HAVE_MACH_CLOCK_GETRES) && defined(OS_SYSTEM_TIME_USING_MACH_CLOCK_GET_TIME)
     init_resp->os_system_time_info.resolution
 	= mach_clock_getres(&internal_state.r.o.mach.clock.wall);
 #elif defined(HAVE_CLOCK_GETRES) && defined(WALL_CLOCK_ID)

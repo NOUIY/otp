@@ -22,6 +22,7 @@
 %%% Created : 28 Oct 2005 by Tobias Lindahl <tobiasl@it.uu.se>
 %%%-------------------------------------------------------------------
 -module(dialyzer_dep).
+-moduledoc false.
 
 -export([analyze/1]).
 -define(NO_UNUSED, true).
@@ -124,22 +125,26 @@ traverse(Tree, Out, State, CurrentFun) ->
       {merge_outs([HdFuns, TlFuns]), State2};
     'fun' ->
       %% io:format("Entering fun: ~w\n", [cerl_trees:get_label(Tree)]),
+      OldNumRvals = state__num_rvals(State),
+      State1 = state__store_num_rvals(1, State),
       Body = cerl:fun_body(Tree),
       Label = cerl_trees:get_label(Tree),
-      State1 =
-	if CurrentFun =:= top -> 
-	    state__add_deps(top, output(set__singleton(Label)), State);
-	   true -> 
-	    O1 = output(set__singleton(CurrentFun)),
-	    O2 = output(set__singleton(Label)),
-	    TmpState = state__add_deps(Label, O1, State),
-	    state__add_deps(CurrentFun, O2,TmpState)
+      State2 =
+        if
+          CurrentFun =:= top ->
+            state__add_deps(top, output(set__singleton(Label)), State1);
+          true ->
+            O1 = output(set__singleton(CurrentFun)),
+            O2 = output(set__singleton(Label)),
+            TmpState = state__add_deps(Label, O1, State1),
+            state__add_deps(CurrentFun, O2, TmpState)
 	end,
       Vars = cerl:fun_vars(Tree),
       Out1 = bind_single(Vars, output(set__singleton(external)), Out),
-      {BodyFuns, State2} =
-        traverse(Body, Out1, State1, cerl_trees:get_label(Tree)),
-      {output(set__singleton(Label)), state__add_esc(BodyFuns, State2)};
+      {BodyFuns, State3} =
+        traverse(Body, Out1, State2, cerl_trees:get_label(Tree)),
+      State4 = state__store_num_rvals(OldNumRvals, State3),
+      {output(set__singleton(Label)), state__add_esc(BodyFuns, State4)};
     'let' ->
       Vars = cerl:let_vars(Tree),
       Arg = cerl:let_arg(Tree),
@@ -379,10 +384,10 @@ is_literal_op(M, F, A) when is_atom(M), is_atom(F), is_integer(A) -> false.
 -record(set, {set :: sets:set()}).
 
 set__singleton(Val) ->
-  #set{set = sets:add_element(Val, sets:new([{version, 2}]))}.
+  #set{set = sets:add_element(Val, sets:new())}.
 
 set__from_list(List) ->
-  #set{set = sets:from_list(List, [{version, 2}])}.
+  #set{set = sets:from_list(List)}.
 
 set__is_element(_El, none) ->
   false;
@@ -433,7 +438,7 @@ merge_outs([#output{type = single, content = S1}|Left],
   merge_outs(Left, output(set__union(S1, S2)));
 merge_outs([#output{type = list, content = L1}|Left],
 	   #output{type = list, content = L2}) ->
-  NewList = [merge_outs([X, Y]) || {X, Y} <- lists:zip(L1, L2)],
+  NewList = [merge_outs([X, Y]) || X <- L1 && Y <- L2],
   merge_outs(Left, output(NewList));
 merge_outs([], Res) ->
   Res.

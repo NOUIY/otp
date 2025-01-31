@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1997-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2022. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -42,7 +42,8 @@
 	 monotonic_time_monotonicity_parallel/1,
 	 time_unit_conversion/1,
 	 signed_time_unit_conversion/1,
-	 erlang_timestamp/1]).
+	 erlang_timestamp/1,
+         native_time_unit_gh6165/1]).
 
 -export([init_per_testcase/2, end_per_testcase/2]).
 
@@ -69,8 +70,8 @@
 init_per_testcase(Func, Config) when is_atom(Func), is_list(Config) ->
     [{testcase, Func}|Config].
 
-end_per_testcase(_Func, _Config) ->
-    ok.
+end_per_testcase(_Func, Config) ->
+    erts_test_utils:ept_check_leaked_nodes(Config).
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
 
@@ -85,7 +86,8 @@ all() ->
      monotonic_time_monotonicity_parallel,
      time_unit_conversion,
      signed_time_unit_conversion,
-     erlang_timestamp].
+     erlang_timestamp,
+     native_time_unit_gh6165].
 
 groups() -> 
     [{now, [], [now_unique, now_update]}].
@@ -105,34 +107,45 @@ end_per_group(_GroupName, Config) ->
 
 %% Test that DST = true on timezones without DST is ignored
 local_to_univ_utc(Config) when is_list(Config) ->
-    case os:type() of
-	{unix,_} ->
-	    %% TZ variable has a meaning
-	    {ok, Peer, Node} = ?CT_PEER(["-env", "TZ", "UTC"]),
-	    {{2008,8,1},{0,0,0}} =
-		rpc:call(Node,
-			 erlang,localtime_to_universaltime,
-			 [{{2008, 8, 1}, {0, 0, 0}},
-			  false]),
-	    {{2008,8,1},{0,0,0}} =
-		rpc:call(Node,
-			 erlang,localtime_to_universaltime,
-			 [{{2008, 8, 1}, {0, 0, 0}},
-			  true]),
-	    [{{2008,8,1},{0,0,0}}] =
-		rpc:call(Node,
-			 calendar,local_time_to_universal_time_dst,
-			 [{{2008, 8, 1}, {0, 0, 0}}]),
-	    peer:stop(Peer);
-	_ ->
-	    {skip,"Only valid on Unix"}
-    end.
+    {ok, Peer, Node} = ?CT_PEER(["-env", "TZ", "UTC"]),
+    {{2008,8,1},{0,0,0}} =
+        rpc:call(Node,
+                 erlang,localtime_to_universaltime,
+                 [{{2008, 8, 1}, {0, 0, 0}},
+                  false]),
+    {{2008,8,1},{0,0,0}} =
+        rpc:call(Node,
+                 erlang,localtime_to_universaltime,
+                 [{{2008, 8, 1}, {0, 0, 0}},
+                  true]),
+    [{{2008,8,1},{0,0,0}}] =
+        rpc:call(Node,
+                 calendar,local_time_to_universal_time_dst,
+                 [{{2008, 8, 1}, {0, 0, 0}}]),
+    peer:stop(Peer).
 
 
 %% Tests conversion from universal to local time.
+%% These cases are currently implemented only for MET and fail in
+%%  all other timezones
+is_stockholm_time() ->
+    case os:type() of
+        {win32, _} -> case os:cmd("tzutil /g") of
+                          "W. Europe Standard Time"++_ -> true;
+                          _ -> false
+                      end;
+        {unix, _} -> case os:cmd("date '+%Z'") of
+                          "ME"++_ -> true; %% covers MET/MEST
+                          "CE"++_ -> true; %% covers CET/CEST
+                          _ -> false
+                      end
+    end.
 
 univ_to_local(Config) when is_list(Config) ->
-    test_univ_to_local(test_data()).
+    case is_stockholm_time() of
+        true -> test_univ_to_local(test_data());
+        false -> {skip, "This test is only valid for Stockholm timezone"}
+    end.
 
 test_univ_to_local([{Utc, Local}|Rest]) ->
     io:format("Testing ~p => ~p~n", [Local, Utc]),
@@ -144,7 +157,10 @@ test_univ_to_local([]) ->
 %% Tests conversion from local to universal time.
 
 local_to_univ(Config) when is_list(Config) ->
-    test_local_to_univ(test_data()).
+    case is_stockholm_time() of
+        true -> test_local_to_univ(test_data());
+        false -> {skip, "This test is only valid for Stockholm timezone"}
+    end.
 
 test_local_to_univ([{Utc, Local}|Rest]) ->
     io:format("Testing ~p => ~p~n", [Utc, Local]),
@@ -852,6 +868,41 @@ process_changed_time_offset(Mon, TO, Changed, Wait) ->
     end.
     
 
+native_time_unit_gh6165(Config) when is_list(Config) ->
+    %% This test could potentially fail even when no bug exists if
+    %% run during heavy load, or if OS system time or Erlang system time
+    %% is changed at an unfortunate time, but it is hard to make the test
+    %% more stable than this without losing actual testing...
+
+    ChkDiff = fun (Val) ->
+                      case erlang:convert_time_unit(Val, native, nanosecond) of
+                          Ns when -1000000 < Ns andalso Ns < 1000000 ->
+                              erlang:display({diff, Ns}),
+                              ok;
+                          Ns ->
+                              erlang:display({large_diff, Ns}),
+                              ct:fail({large_diff, Ns})
+                      end
+              end,
+    
+    process_flag(priority, max),
+
+    erlang:yield(),
+    V1 = erlang:monotonic_time(native) - erlang:monotonic_time(),
+    ChkDiff(V1),
+
+    erlang:yield(),
+    V2 = erlang:system_time(native) - erlang:system_time(),
+    ChkDiff(V2),
+
+    erlang:yield(),
+    V3 = os:system_time(native) - os:system_time(),
+    ChkDiff(V3),
+    
+    erlang:yield(),
+    0 = erlang:time_offset() - erlang:time_offset(native),
+
+    ok.
 
 %% Returns the test data: a list of {Utc, Local} tuples.
 

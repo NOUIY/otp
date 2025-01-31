@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2018-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2018-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,13 +36,45 @@
 #define LONG(L)  ((long) (L))
 #define ULONG(L) ((unsigned long) (L))
 #define SZT(I)   ((size_t) (I))
+#ifndef VOID
 #define VOID(D)  ((void) (D))
+#endif
 #define VOIDP(P) ((void*) (P))
 #define CHARP(P) ((char*) (P))
 #define UCHARP(P) ((unsigned char*) (P))
 
 #define ESOCK_ABORT(E)  esock_abort(E, __func__, __FILE__, __LINE__)
 #define ESOCK_ASSERT(e) ((void) ((e) ? 1 : (ESOCK_ABORT(#e), 0)))
+
+#define MKEEI(E, RI, I) \
+    esock_make_extra_error_info_term((E),          \
+                                     __FILE__,     \
+                                     __FUNCTION__, \
+                                     __LINE__,     \
+                                     (RI), (I))
+
+#if defined(ESOCK_USE_EXTENDED_ERROR_INFO)
+#define ENO2T(E, ENO) MKEEI((E),                                \
+                            MKI((E), (ENO)),                    \
+                            esock_errno_to_term((E), (ENO)))
+#else
+#define ENO2T(E, ENO) esock_errno_to_term((E), (ENO))
+#endif
+
+
+extern
+ERL_NIF_TERM esock_make_extra_error_info_term(ErlNifEnv*   env,
+                                              const char*  file,
+                                              const char*  function,
+                                              const int    line,
+                                              ERL_NIF_TERM rawinfo,
+                                              ERL_NIF_TERM info);
+
+extern
+unsigned int esock_get_uint_from_map(ErlNifEnv*   env,
+                                     ERL_NIF_TERM map,
+                                     ERL_NIF_TERM key,
+                                     unsigned int def);
 
 extern
 BOOLEAN_T esock_get_bool_from_map(ErlNifEnv*   env,
@@ -54,13 +86,13 @@ extern
 BOOLEAN_T esock_decode_iov(ErlNifEnv*    env,
                            ERL_NIF_TERM  eIOV,
                            ErlNifBinary* bufs,
-                           struct iovec* iov,
+                           SysIOVec*     iov,
                            size_t        len,
                            ssize_t*      totSize);
 extern
 void esock_encode_iov(ErlNifEnv*    env,
                       ssize_t       read,
-                      struct iovec* iov,
+                      SysIOVec*     iov,
                       size_t        len,
                       ErlNifBinary* data,
                       ERL_NIF_TERM* eIOV);
@@ -73,8 +105,13 @@ BOOLEAN_T esock_decode_sockaddr(ErlNifEnv*    env,
 extern
 void esock_encode_sockaddr(ErlNifEnv*    env,
                            ESockAddress* sockAddrP,
-                           SOCKLEN_T     addrLen,
+                           int           addrLen,
                            ERL_NIF_TERM* eSockAddr);
+extern
+BOOLEAN_T esock_decode_hwsockaddr(ErlNifEnv*    env,
+                                  ERL_NIF_TERM  eSockAddr,
+                                  ESockAddress* sockAddrP,
+                                  SOCKLEN_T*    addrLen);
 extern
 void esock_encode_hwsockaddr(ErlNifEnv*       env,
 			     struct sockaddr* sockAddrP,
@@ -153,6 +190,9 @@ extern BOOLEAN_T esock_decode_timeval(ErlNifEnv*      env,
                                       struct timeval* timeP);
 
 extern
+char* esock_domain_to_string(int domain);
+
+extern
 void esock_encode_domain(ErlNifEnv*    env,
                          int           domain,
                          ERL_NIF_TERM* eDomain);
@@ -160,6 +200,9 @@ extern
 int esock_decode_domain(ErlNifEnv*   env,
                         ERL_NIF_TERM eDomain,
                         int*         domain);
+
+extern
+char* esock_protocol_to_string(int domain);
 
 extern
 BOOLEAN_T esock_decode_type(ErlNifEnv*   env,
@@ -239,11 +282,18 @@ ERL_NIF_TERM esock_self(ErlNifEnv* env);
 extern
 ERL_NIF_TERM esock_make_ok2(ErlNifEnv* env, ERL_NIF_TERM any);
 extern
+ERL_NIF_TERM esock_errno_to_term(ErlNifEnv* env, int err);
+extern
 ERL_NIF_TERM esock_make_error(ErlNifEnv* env, ERL_NIF_TERM reason);
+extern
+ERL_NIF_TERM esock_make_error_closed(ErlNifEnv* env);
 extern
 ERL_NIF_TERM esock_make_error_str(ErlNifEnv* env, char* reason);
 extern
 ERL_NIF_TERM esock_make_error_errno(ErlNifEnv* env, int err);
+extern
+ERL_NIF_TERM esock_make_error_t2r(ErlNifEnv* env,
+                                  ERL_NIF_TERM tag, ERL_NIF_TERM reason);
 extern
 ERL_NIF_TERM esock_make_error_invalid(ErlNifEnv* env, ERL_NIF_TERM what);
 extern
@@ -265,8 +315,18 @@ BOOLEAN_T esock_timestamp_str(char *buf, unsigned int len);
 extern
 BOOLEAN_T esock_format_timestamp(ErlNifTime timestamp, char *buf, unsigned int len);
 
-extern
-void esock_warning_msg(const char* format, ... );
+#define MSG_FUNCS                               \
+    MSG_FUNC_DEF(info)                          \
+    MSG_FUNC_DEF(warning)                       \
+    MSG_FUNC_DEF(error)
+
+#define MSG_FUNC_DEF(FN)                                \
+    extern                                              \
+    void esock_##FN##_msg(const char* format, ... );
+
+MSG_FUNCS
+#undef MSG_FUNC_DEF
+#undef MSG_FUNCS
 
 extern
 BOOLEAN_T esock_is_integer(ErlNifEnv *env, ERL_NIF_TERM term);

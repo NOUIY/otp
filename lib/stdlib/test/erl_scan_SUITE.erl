@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1998-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1998-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,7 +23,8 @@
 	 init_per_group/2,end_per_group/2]).
 
 -export([error_1/1, error_2/1, iso88591/1, otp_7810/1, otp_10302/1,
-	 otp_10990/1, otp_10992/1, otp_11807/1, otp_16480/1, otp_17024/1]).
+	 otp_10990/1, otp_10992/1, otp_11807/1, otp_16480/1, otp_17024/1,
+         text_fun/1, triple_quoted_string/1]).
 
 -import(lists, [nth/2,flatten/1]).
 -import(io_lib, [print/1]).
@@ -56,11 +57,11 @@ suite() ->
     [{ct_hooks,[ts_install_cth]},
      {timetrap,{minutes,20}}].
 
-all() -> 
+all() ->
     [{group, error}, iso88591, otp_7810, otp_10302, otp_10990, otp_10992,
-     otp_11807, otp_16480, otp_17024].
+     otp_11807, otp_16480, otp_17024, text_fun, triple_quoted_string].
 
-groups() -> 
+groups() ->
     [{error, [], [error_1, error_2]}].
 
 init_per_suite(Config) ->
@@ -89,14 +90,17 @@ error_2(Config) when is_list(Config) ->
 
 error_cases() ->
     ["'a",
-     "\"a",
+     "\"a",%"
      "'\\",
-     "\"\\",
+     "\"\\",%"
      "$",
      "$\\",
      "2.3e",
      "2.3e-",
-     "91#9"
+     "91#9",
+     "\"\"\"x",%"
+     "\"\"\"\n\"\"",%"
+     "\"\"\"\nx\n \"\"\""
     ].
 
 assert_type(N, integer) when is_integer(N) ->
@@ -161,6 +165,7 @@ otp_7810(Config) when is_list(Config) ->
     ok = integers(),
     ok = base_integers(),
     ok = floats(),
+    ok = base_floats(),
     ok = dots(),
     ok = chars(),
     ok = variables(),
@@ -219,7 +224,7 @@ punctuations() ->
          Ts = [{W,{1,1}}],
          test_string(S, Ts)
      end || S <- L],
-    Three = ["/=:=", "<=:=", "==:=", ">=:="], % three tokens...
+    Three = ["/=:=", "<:=", "==:=", ">=:="], % three tokens...
     No = Three ++ L,
     SL0 = [{S1++S2,{-length(S1),S1,S2}} ||
               S1 <- L,
@@ -243,8 +248,8 @@ punctuations() ->
 
     PTs2 = [{'#',{1,1}},{'&',{1,2}},{'*',{1,3}},{'+',{1,4}},{'/',{1,5}},
             {':',{1,6}},{'<',{1,7}},{'>',{1,8}},{'?',{1,9}},{'@',{1,10}},
-            {'\\',{1,11}},{'^',{1,12}},{'`',{1,13}},{'~',{1,14}}],
-    test_string("#&*+/:<>?@\\^`~", PTs2),
+            {'\\',{1,11}},{'^',{1,12}},{'`',{1,13}}],
+    test_string("#&*+/:<>?@\\^`", PTs2),
 
     test_string(".. ", [{'..',{1,1}}]),
     test_string("1 .. 2",
@@ -275,15 +280,16 @@ comments() ->
     ok.
 
 errors() ->
-    {error,{1,erl_scan,{string,$',"qa"}},1} = erl_scan:string("'qa"), %'
-    {error,{{1,1},erl_scan,{string,$',"qa"}},{1,4}} = %'
+    {error,{1,erl_scan,{unterminated,atom,"qa"}},1} = erl_scan:string("'qa"), %'
+    {error,{{1,2},erl_scan,{unterminated,atom,"qa"}},{1,4}} = %'
         erl_scan:string("'qa", {1,1}, []), %'
-    {error,{1,erl_scan,{string,$","str"}},1} = %"
+    {error,{1,erl_scan,{unterminated,string,"str"}},1} = %"
         erl_scan:string("\"str"), %"
-    {error,{{1,1},erl_scan,{string,$","str"}},{1,5}} = %"
+    {error,{{1,2},erl_scan,{unterminated,string,"str"}},{1,5}} = %"
         erl_scan:string("\"str", {1,1}, []), %"
-    {error,{1,erl_scan,char},1} = erl_scan:string("$"),
-    {error,{{1,1},erl_scan,char},{1,2}} = erl_scan:string("$", {1,1}, []),
+    {error,{1,erl_scan,{unterminated,char}},1} = erl_scan:string("$"),
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,2}} =
+        erl_scan:string("$", {1,1}, []),
     test_string([34,65,200,34], [{string,{1,1},"AÈ"}]),
     test_string("\\", [{'\\',{1,1}}]),
     {'EXIT',_} =
@@ -308,24 +314,37 @@ integers() ->
          fun({S, I}) ->
                  test_string(S, [{integer, {1, 1}, I}])
          end, UnderscoreSamples),
-    UnderscoreErrors =
+    NotIntegers =
+        ["_123",
+         "__123"],
+    lists:foreach(
+      fun(S) ->
+              case erl_scan_string(S) of
+                  {ok, [{integer, _, _}|_], _} ->
+                      error({unexpected_integer, S});
+                  {ok, _, _} ->
+                      ok
+              end
+      end, NotIntegers),
+    IntegerErrors =
         ["123_",
          "123__",
          "123_456_",
          "123__456",
-         "_123",
-         "__123"],
+         "123_.456",
+         "123abc",
+         "12@"],
     lists:foreach(
       fun(S) ->
-              case erl_scan:string(S) of
-                  {ok, [{integer, _, _}], _} ->
-                      error({unexpected_integer, S});
-                  _ ->
-                      ok
+              case erl_scan_string(S) of
+                  {error,{1,erl_scan,{illegal,integer}},_} ->
+                      ok;
+                  {error,Err,_} ->
+                      error({unexpected_error, S, Err});
+                  Succ ->
+                      error({unexpected_success, S, Succ})
               end
-      end, UnderscoreErrors),
-    test_string("_123", [{var,{1,1},'_123'}]),
-    test_string("123_", [{integer,{1,1},123},{var,{1,4},'_'}]),
+      end, IntegerErrors),
     ok.
 
 base_integers() ->
@@ -345,8 +364,6 @@ base_integers() ->
     {error,{{1,1},erl_scan,{base,1000}},{1,6}} =
         erl_scan:string("1_000#000", {1,1}, []),
 
-    test_string("12#bc", [{integer,{1,1},11},{atom,{1,5},c}]),
-
     [begin
          Str = BS ++ "#" ++ S,
          E = 2 + length(BS),
@@ -354,12 +371,6 @@ base_integers() ->
              erl_scan:string(Str, {1,1}, [])
      end || {BS,S} <- [{"3","3"},{"15","f"},{"12","c"},
                        {"1_5","f"},{"1_2","c"}] ],
-
-    {ok,[{integer,1,239},{'@',1}],1} = erl_scan_string("16#ef@"),
-    {ok,[{integer,{1,1},239},{'@',{1,6}}],{1,7}} =
-        erl_scan_string("16#ef@", {1,1}, []),
-    {ok,[{integer,{1,1},14},{atom,{1,5},g@}],{1,7}} =
-        erl_scan_string("16#eg@", {1,1}, []),
 
     UnderscoreSamples =
         [{"16#1234_ABCD_EF56", 16#1234abcdef56},
@@ -371,7 +382,7 @@ base_integers() ->
          fun({S, I}) ->
                  test_string(S, [{integer, {1, 1}, I}])
          end, UnderscoreSamples),
-    UnderscoreErrors =
+    IntegerErrors =
         ["16_#123ABC",
          "16#123_",
          "16#_123",
@@ -379,17 +390,23 @@ base_integers() ->
          "16#_ABC",
          "2#_0101",
          "1__6#ABC",
-         "16#AB__CD"],
+         "16#AB__CD",
+         "16#eg",
+         "16#ef@",
+         "10_#",
+         "10#12a4",
+         "10#12A4"],
     lists:foreach(
       fun(S) ->
-              case erl_scan:string(S) of
-                  {ok, [{integer, _, _}], _} ->
-                      error({unexpected_integer, S});
-                  _ ->
-                      ok
+              case erl_scan_string(S) of
+                  {error,{1,erl_scan,{illegal,integer}},_} ->
+                      ok;
+                  {error,Err,_} ->
+                      error({unexpected_error, S, Err});
+                  Succ ->
+                      error({unexpected_success, S, Succ})
               end
-      end, UnderscoreErrors),
-    test_string("16#123_", [{integer,{1,1},291},{var,{1,7},'_'}]),
+      end, IntegerErrors),
     test_string("_16#ABC", [{var,{1,1},'_16'},{'#',{1,4}},{var,{1,5},'ABC'}]),
     ok.
 
@@ -400,7 +417,6 @@ floats() ->
          test_string(FS, Ts)
      end || FS <- ["1.0","001.17","3.31200","1.0e0","1.0E17",
                    "34.21E-18", "17.0E+14"]],
-    test_string("1.e2", [{integer,{1,1},1},{'.',{1,2}},{atom,{1,3},e2}]),
 
     {error,{1,erl_scan,{illegal,float}},1} =
         erl_scan:string("1.0e400"),
@@ -425,25 +441,111 @@ floats() ->
          fun({S, I}) ->
                  test_string(S, [{float, {1, 1}, I}])
          end, UnderscoreSamples),
-    UnderscoreErrors =
-        ["123_.456",
-         "123._456",
-         "123.456_",
-         "123._",
-         "1._23e10",
+    FloatErrors =
+        ["123.456_",
+         "1.23_e10",
          "1.23e_10",
-         "1.23e10_"],
+         "1.23e10_",
+         "123.45_e6",
+         "123.45a12",
+         "123.45e23a12",
+         "1.e2",
+         "12._34",
+         "123.a4"
+        ],
     lists:foreach(
       fun(S) ->
-              case erl_scan:string(S) of
-                  {ok, [{float, _, _}], _} ->
-                      error({unexpected_float, S});
-                  _ ->
-                      ok
+              case erl_scan_string(S) of
+                  {error,{1,erl_scan,{illegal,float}},_} ->
+                      ok;
+                  {error,Err,_} ->
+                      error({unexpected_error, S, Err});
+                  Succ ->
+                      error({unexpected_success, S, Succ})
               end
-      end, UnderscoreErrors),
-    test_string("123._", [{integer,{1,1},123},{'.',{1,4}},{var,{1,5},'_'}]),
-    test_string("1.23_e10", [{float,{1,1},1.23},{var,{1,5},'_e10'}]),
+      end, FloatErrors),
+    ok.
+
+base_floats() ->
+    [begin
+         Ts = [{float,{1,1},F}],
+         test_string(FS, Ts)
+     end || {FS, F} <- [{"10#1.0",1.0},
+                        {"10#012345.625", 012345.625},
+                        {"10#3.31200",3.31200},
+                        {"10#1.0#e0",1.0e0},
+                        {"10#1.0#E17",1.0E17},
+                        {"10#34.21#E-18", 34.21E-18},
+                        {"10#17.0#E+14", 17.0E+14},
+                        {"10#12345.625#e3", 12345.625e3},
+                        {"10#12345.625#E-3", 12345.625E-3},
+
+                        {"2#1.0", 1.0},
+                        {"2#101.0", 5.0},
+                        {"2#101.1", 5.5},
+                        {"2#101.101", 5.625},
+                        {"2#101.1#e0", 5.5},
+                        {"2#1.0#e+3", 8.0},
+                        {"2#1.0#e-3", 0.125},
+                        {"2#000100.001000", 4.125},
+                        {"2#0.10000000000000000000000000000000000000000000000000001", 0.5000000000000001}, % 53 bits
+                        {"2#0.100000000000000000000000000000000000000000000000000001", 0.5}, % not 54 bits
+                        {"2#0.11001001000011111101101010100010001000010110100011000#e+2", math:pi()}, % pi to 53 bits
+
+                        {"3#102.12", 3#10212/3#100},
+
+                        {"16#100.0", 256.0},
+                        {"16#ff.d", 16#ffd/16},
+                        {"16#1.0", 1.0},
+                        {"16#abc.def", 16#abcdef/16#1000},
+                        {"16#00100.001000", 256.0 + 1/16#1000},
+                        {"16#0.80000000000008", 0.5000000000000001}, % 53-bit fraction
+                        {"16#0.80000000000004", 0.5}, % not 54 bits
+                        {"16#fe.8#e0", 16#fe8/16},
+                        {"16#f.e#e+3", float(16#fe*16#100)},
+                        {"16#c.0#e-1", 16#c/16},
+                        {"16#0.0e0", 16#e/16#100}, % e is a hex digit, not exponent
+                        {"16#0.0E0", 16#e/16#100}, % same for E
+                        {"16#0.3243f6a8885a30#e+1", math:pi()} % pi to 53 bits
+                       ]],
+
+    [begin
+         {error,{1,erl_scan,{illegal,float}},1} = erl_scan_string(S),
+         {error,{{1,1},erl_scan,{illegal,float}},{1,_}} =
+             erl_scan_string(S, {1,1}, [])
+     end || S <- ["1.14Ea"]],
+
+    UnderscoreSamples =
+        [{"1_6#000_100.0_0", 256.0},
+         {"16#0.3243_f6a8_885a_30#e+1", math:pi()},
+         {"16#3243_f6a8.885a_30#e-7", math:pi()},
+         {"16#3243_f6a8_885a.30#e-1_1", math:pi()},
+         {"2#1.010101010101010101010#e+2_1", 2796202.0}],
+    lists:foreach(
+         fun({S, I}) ->
+                 test_string(S, [{float, {1, 1}, I}])
+         end, UnderscoreSamples),
+    FloatErrors =
+        [
+         "10#12345.a25",
+         "10#12345.6a5",
+         "16#a0.gf23",
+         "16#a0.2fg3",
+         "2#10.201",
+         "2#10.120",
+         "3#102.3"
+        ],
+    lists:foreach(
+      fun(S) ->
+              case erl_scan_string(S) of
+                  {error,{1,erl_scan,{illegal,float}},_} ->
+                      ok;
+                  {error,Err,_} ->
+                      error({unexpected_error, S, Err});
+                  Succ ->
+                      error({unexpected_success, S, Succ})
+              end
+      end, FloatErrors),
     ok.
 
 dots() ->
@@ -454,10 +556,10 @@ dots() ->
            {".\210",{ok,[{dot,1}],1}, {ok,[{dot,{1,1}}],{1,3}}},
            {".% öh",{ok,[{dot,1}],1}, {ok,[{dot,{1,1}}],{1,6}}},
            {".%\n", {ok,[{dot,1}],2}, {ok,[{dot,{1,1}}],{2,1}}},
-           {".$",   {error,{1,erl_scan,char},1},
-	    {error,{{1,2},erl_scan,char},{1,3}}},
-           {".$\\", {error,{1,erl_scan,char},1},
-                    {error,{{1,2},erl_scan,char},{1,4}}},
+           {".$",   {error,{1,erl_scan,{unterminated,char}},1},
+	    {error,{{1,2},erl_scan,{unterminated,char}},{1,3}}},
+           {".$\\", {error,{1,erl_scan,{unterminated,char}},1},
+                    {error,{{1,2},erl_scan,{unterminated,char}},{1,4}}},
            {".a",   {ok,[{'.',1},{atom,1,a}],1},
 	    {ok,[{'.',{1,1}},{atom,{1,2},a}],{1,3}}}
           ],
@@ -473,8 +575,10 @@ dots() ->
     {ok,[{dot,_}=T3],{1,6}} =
         erl_scan:string(".% öh", {1,1}, text),
     [1, 1, "."] = token_info(T3),
-    {error,{{1,2},erl_scan,char},{1,3}} = erl_scan:string(".$", {1,1}),
-    {error,{{1,2},erl_scan,char},{1,4}} = erl_scan:string(".$\\", {1,1}),
+    {error,{{1,2},erl_scan,{unterminated,char}},{1,3}} =
+        erl_scan:string(".$", {1,1}),
+    {error,{{1,2},erl_scan,{unterminated,char}},{1,4}} =
+        erl_scan:string(".$\\", {1,1}),
 
     test_string(". ", [{dot,{1,1}}]),
     test_string(".  ", [{dot,{1,1}}]),
@@ -515,12 +619,17 @@ chars() ->
          test_string(L, Ts)
      end || C <- lists:seq(0, 255)],
 
-    %% $\^\n now increments the line...
+    %% GH-6477. Test legal use of caret notation.
     [begin
          L = "$\\^" ++ [C],
-         Ts = [{char,{1,1},C band 2#11111}],
+         Ts = case C of
+                  $? ->
+                      [{char,{1,1},127}];
+                  _ ->
+                      [{char,{1,1},C band 2#11111}]
+              end,
          test_string(L, Ts)
-     end || C <- lists:seq(0, 255)],
+     end || C <- lists:seq($?, $Z) ++ lists:seq($a, $z)],
 
     [begin
          L = "$\\" ++ [C],
@@ -560,7 +669,7 @@ chars() ->
      end || C <- lists:seq(0, 255) -- (No ++ [$\\])],
     test_string("$\n", [{char,{1,1},$\n}]),
 
-    {error,{{1,1},erl_scan,char},{1,4}} =
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,4}} =
         erl_scan:string("$\\^",{1,1}),
     test_string("$\\\n", [{char,{1,1},$\n}]),
     %% Robert's scanner returns line 1:
@@ -671,10 +780,18 @@ illegal() ->
         erl_scan:string(String, {1,1}),
     {done,{error,{{1,4},erl_scan,{illegal,character}},{1,14}},"34\". "} =
         erl_scan:tokens([], String++". ", {1,1}),
+
+    %% GH-6477. Test for illegal characters in caret notation.
+    _ = [begin
+             S = [$$,$\\,$^,C],
+             {error,{1,erl_scan,{illegal,character}},1} = erl_scan:string(S)
+         end || C <- lists:seq(0, 16#3e) ++ [16#60] ++ lists:seq($z+1, 16#10ffff)],
     ok.
 
 crashes() ->
     {'EXIT',_} = (catch {foo, erl_scan:string([-1])}), % type error
+    {'EXIT',_} = (catch erl_scan:string("'a" ++ [999999999] ++ "c'")),
+
     {'EXIT',_} = (catch {foo, erl_scan:string("$"++[-1])}),
     {'EXIT',_} = (catch {foo, erl_scan:string("$\\"++[-1])}),
     {'EXIT',_} = (catch {foo, erl_scan:string("$\\^"++[-1])}),
@@ -697,6 +814,7 @@ crashes() ->
          (catch {foo, erl_scan:string("% foo"++[a],{1,1})}),
 
     {'EXIT',_} = (catch {foo, erl_scan:string([3.0])}), % type error
+    {'EXIT',_} = (catch {foo, erl_scan:string("A" ++ [999999999])}),
 
     ok.
 
@@ -796,28 +914,33 @@ anno_info() ->
     ok.
 
 column_errors() ->
-    {error,{{1,1},erl_scan,{string,$',""}},{1,3}} = % $'
+    {error,{{1,2},erl_scan,{unterminated,atom,""}},{1,3}} = % $'
         erl_scan:string("'\\",{1,1}),
-    {error,{{1,1},erl_scan,{string,$",""}},{1,3}} = % $"
+    {error,{{1,2},erl_scan,{unterminated,string,""}},{1,3}} = % $"
         erl_scan:string("\"\\",{1,1}),
 
-    {error,{{1,1},erl_scan,{string,$',""}},{1,2}} =  % $'
+    {error,{{1,2},erl_scan,{unterminated,atom,""}},{1,2}} =  % $'
         erl_scan:string("'",{1,1}),
-    {error,{{1,1},erl_scan,{string,$",""}},{1,2}} =  % $"
+    {error,{{1,2},erl_scan,{unterminated,string,""}},{1,2}} =  % $"
         erl_scan:string("\"",{1,1}),
 
-    {error,{{1,1},erl_scan,char},{1,2}} =
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,2}} =
         erl_scan:string("$",{1,1}),
 
-    {error,{{1,2},erl_scan,{string,$',"1234567890123456"}},{1,20}} = %'
+    {error,{{1,3},erl_scan,
+            {unterminated,atom,"1234567890123456"}},{1,20}} = %'
         erl_scan:string(" '12345678901234567", {1,1}),
-    {error,{{1,2},erl_scan,{string,$',"123456789012345 "}}, {1,20}} = %'
+    {error,{{1,3},erl_scan,
+            {unterminated,atom,"123456789012345 "}}, {1,20}} = %'
         erl_scan:string(" '123456789012345\\s", {1,1}),
-    {error,{{1,2},erl_scan,{string,$","1234567890123456"}},{1,20}} = %"
+    {error,{{1,3},erl_scan,
+            {unterminated,string,"1234567890123456"}},{1,20}} = %"
         erl_scan:string(" \"12345678901234567", {1,1}),
-    {error,{{1,2},erl_scan,{string,$","123456789012345 "}}, {1,20}} = %"
+    {error,{{1,3},erl_scan,
+            {unterminated,string,"123456789012345 "}}, {1,20}} = %"
         erl_scan:string(" \"123456789012345\\s", {1,1}),
-    {error,{{1,2},erl_scan,{string,$',"1234567890123456"}},{2,1}} = %'
+    {error,{{1,3},erl_scan,
+            {unterminated,atom,"1234567890123456"}},{2,1}} = %'
         erl_scan:string(" '12345678901234567\n", {1,1}),
     ok.
 
@@ -866,20 +989,20 @@ unicode() ->
         erl_scan:string([1089]),
     {error,{{1,1},erl_scan,{illegal,character}},{1,2}} =
         erl_scan:string([1089], {1,1}),
-    {error,{{1,3},erl_scan,{illegal,character}},{1,4}} =
-        erl_scan:string("'a" ++ [999999999] ++ "c'", {1,1}),
+    {error,{{1,1},erl_scan,{illegal,character}},{1,2}} =
+        erl_scan:string([16#D800], {1,1}),
 
     test("\"a"++[1089]++"b\""),
-    {ok,[{char,1,1}],1} =
+    {error,{1,erl_scan,{illegal,character}},1} =
         erl_scan_string([$$,$\\,$^,1089], 1),
 
     {error,{1,erl_scan,Error},1} =
         erl_scan:string("\"qa\x{aaa}", 1),
     "unterminated string starting with \"qa"++[2730]++"\"" =
         erl_scan:format_error(Error),
-    {error,{{1,1},erl_scan,_},{1,11}} =
+    {error,{{1,2},erl_scan,_},{1,11}} =
         erl_scan:string("\"qa\\x{aaa}",{1,1}),
-    {error,{{1,1},erl_scan,_},{1,11}} =
+    {error,{{1,2},erl_scan,_},{1,11}} =
         erl_scan:string("'qa\\x{aaa}",{1,1}),
 
     {ok,[{char,1,1089}],1} =
@@ -907,7 +1030,7 @@ unicode() ->
     U3 = "\"a\n\\x{fff}\n\"",
     {ok,[{string,1,[$a,$\n,$\x{fff},$\n]}],3} = erl_scan_string(U3, 1),
 
-    U4 = "\"\\^\n\\x{aaa}\\^\n\"",
+    U4 = "\"\n\\x{aaa}\n\"",
     {ok,[{string,1,[$\n,$\x{aaa},$\n]}],3} = erl_scan_string(U4, 1),
 
     %% Keep these tests:
@@ -942,17 +1065,17 @@ more_chars() ->
     {ok,[{char,1,123},{atom,1,a},{'}',1}],1} =
         erl_scan_string("$\\{a}"),
 
-    {error,{{1,1},erl_scan,char},{1,4}} =
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,4}} =
         erl_scan:string("$\\x", {1,1}),
-    {error,{{1,1},erl_scan,char},{1,5}} =
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,5}} =
         erl_scan:string("$\\x{",{1,1}),
     {more, C3} = erl_scan:tokens([], "$\\x", {1,1}),
-    {done,{error,{{1,1},erl_scan,char},{1,4}},eof} =
+    {done,{error,{{1,1},erl_scan,{unterminated,char}},{1,4}},eof} =
         erl_scan:tokens(C3, eof, 1),
-    {error,{{1,1},erl_scan,char},{1,5}} =
+    {error,{{1,1},erl_scan,{unterminated,char}},{1,5}} =
         erl_scan:string("$\\x{",{1,1}),
     {more, C2} = erl_scan:tokens([], "$\\x{", {1,1}),
-    {done,{error,{{1,1},erl_scan,char},{1,5}},eof} =
+    {done,{error,{{1,1},erl_scan,{unterminated,char}},{1,5}},eof} =
         erl_scan:tokens(C2, eof, 1),
     {error,{1,erl_scan,{illegal,character}},1} =
         erl_scan:string("$\\x{g}"),
@@ -1022,7 +1145,7 @@ otp_10302(Config) when is_list(Config) ->
     U3 = "\"a\n\\x{fff}\n\"",
     {ok,[{string,1,[97,10,4095,10]}],3} = erl_scan_string(U3, 1),
 
-    U4 = "\"\\^\n\\x{aaa}\\^\n\"",
+    U4 = "\"\n\\x{aaa}\n\"",
     {ok,[{string,1,[10,2730,10]}],3} = erl_scan_string(U4, 1,[]),
 
     Str1 = "\"ab" ++ [1089] ++ "cd\"",
@@ -1212,6 +1335,326 @@ otp_17024(Config) when is_list(Config) ->
     {integer,Location,1} = erl_parse_abstract(1, Opts2),
     ok.
 
+text_fun(Config) when is_list(Config) ->
+    KeepClass = fun(Class) ->
+                        fun(C, _) -> C == Class end
+                end,
+
+    Join = fun(L, S) -> string:join(L, S) end,
+    String = fun(L) -> Join(L, " ") end,
+
+    TextAtom = KeepClass(atom),
+    TextInt = KeepClass(integer),
+    %% Keep text for integers written with a base.
+    TextBase = fun(C, S) ->
+                       C == integer andalso string:find(S, "#") /= nomatch
+               end,
+    %% Keep text for long strings, regardless of class
+    TextLong = fun(_, S) -> length(S) > 10 end,
+
+    Texts = fun(Toks) -> [erl_scan:text(T) || T <- Toks] end,
+    Values =  fun(Toks) -> [erl_scan:symbol(T) || T <- Toks] end,
+
+    Atom1 = "foo",
+    Atom2 = "'this is a long atom'",
+    Int1 = "42",
+    Int2 = "16#10",
+    Int3 = "8#20",
+    Int4 = "16",
+    Int5 = "12345678901234567890",
+    String1 = "\"A String\"",
+    String2 = "\"guitar string\"",
+    Name1 = "Short",
+    Name2 = "LongAndDescriptiveName",
+    Sep1 = "{",
+    Sep2 = "+",
+    Sep3 = "]",
+    Sep4 = "/",
+
+    All = [Atom1, Atom2, Int1, Int2, Int3, Int4, Int5,
+           String1, String2, Name1, Name2,
+           Sep1, Sep2, Sep3, Sep4],
+
+    {ok, Tokens0, 2} =
+        erl_scan:string(String([Atom1, Int1]), 2, [{text_fun, TextAtom}]),
+    [Atom1, undefined] = Texts(Tokens0),
+    [foo, 42] = Values(Tokens0),
+
+    {ok, Tokens1, 3} =
+        erl_scan:string(Join([Int2, Int3, Int4], "\n"), 1,
+                        [{text_fun, TextInt}]),
+    [Int2, Int3, Int4] = Texts(Tokens1),
+    [16, 16, 16] = Values(Tokens1),
+
+    TS = [Int2, String1, Atom1, Int3, Int4, String2],
+    {ok, Tokens2, 6} =
+        %% If text is present, we supply text for *all* tokens.
+        erl_scan:string(Join(TS, "\n"), 1, [{text_fun, TextAtom}, text]),
+    TS = Texts(Tokens2),
+    [16, "A String", foo, 16, 16, "guitar string"] = Values(Tokens2),
+
+    Ints = [Int1, Int2, Int3, Int4],
+    {ok, Tokens3, 1} = erl_scan:string(String(Ints), 1, [{text_fun, TextBase}]),
+    [undefined, Int2, Int3, undefined] = Texts(Tokens3),
+    [42, 16, 16, 16] = Values(Tokens3),
+
+    Longs = lists:filter(fun(S) -> length(S) > 10 end, All),
+    {ok, Tokens4, 1} =
+        erl_scan:string(String(All), 1, [{text_fun, TextLong}]),
+    Longs = lists:filter(fun(T) -> T /= undefined end, Texts(Tokens4)),
+
+    {ok, Tokens5, 7} =
+        erl_scan:string(String(All), 7, [{text_fun, KeepClass('{')}]),
+    [Sep1] = lists:filter(fun(T) -> T /= undefined end, Texts(Tokens5)).
+
+triple_quoted_string(Config) when is_list(Config) ->
+    {ok,[{string,1,""}],2} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\"\"\""),
+
+    {ok,[{string,1,""}],3} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\n"
+          "\"\"\""),
+
+    {ok,[{string,1,""}],3} =
+        erl_scan:string(
+          "\"\"\"\n"
+          " \n"
+          " \"\"\""),
+
+    {ok,[{string,1,""}],3} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\n"
+          " \"\"\""),
+
+    {ok,[{string,1,""}],3} =
+        erl_scan:string(
+          "\"\"\"\r\n"
+          "  \r\n"
+          "  \"\"\""),
+
+    {error,{{2,2},erl_scan,indentation},{3,6}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          " \n" % One space too little indentation
+          "  \"\"\"", {1,1}, []),
+
+    {ok,[{string,1,"\n"}],4} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\n"
+          "\n"
+          "\"\"\""),
+
+    {ok,[{string,1,"\r\n"}],4} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "  \r\n"
+          "  \n"
+          "  \"\"\""),
+
+    {ok,[{string,1,"\n"}],4} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "  \n"
+          "\r\n"
+          "  \"\"\""),
+
+    {ok,[{string,1,"\r\n"}],4} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\r\n"
+          "  \n"
+          "  \"\"\""),
+
+    {error,{{3,2},erl_scan,indentation},{4,6}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "  \n"
+          " \r\n"
+          "  \"\"\"", {1,1}, []),
+
+    {error,{{2,3},erl_scan,indentation},{4,7}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "  \n" % One space too little indentation
+          "   \r\n"
+          "   \"\"\"", {1,1}, []),
+
+    {ok,[{string,1,"CR LF"}],3} =
+        erl_scan:string(
+          "\"\"\" \t\r\n"
+          "CR LF\r\n"
+          "\"\"\""),
+
+    {ok,[{string,1,"this is a\nvery long\nstring"}],5} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "this is a\n"
+          "very long\n"
+          "string\n"
+          "\"\"\""),
+
+    {ok,[{string,1,"this is a\r\nvery long\r\nstring"}],5} =
+        erl_scan:string(
+          "\"\"\"\r\n"
+          "  this is a\r\n"
+          "  very long\r\n"
+          "  string\r\n"
+          "  \"\"\""),
+
+    {ok,
+     [{string,1,
+       "this is a string\r\n"
+       "\n"
+       "\r\n"
+       "with three empty lines\n"
+       "\r\n"}],
+     8} =
+        erl_scan:string(
+          "\"\"\"\r\n"
+          "  this is a string\r\n"
+          "\n"
+          "  \r\n"
+          "  with three empty lines\n"
+          "\r\n"
+          "\n"
+          "  \"\"\""),
+
+    {ok,[{string,1,"  this is a\n    very long\n  string"}],5} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\t  this is a\n"
+          "\t    very long\n"
+          "\t  string\n"
+          "\t\"\"\""),
+
+    {ok,[{string,1,"this is a \\\\\nvery long \\\\\nstring\\\\"}],5} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "this is a \\\\\n"
+          "very long \\\\\n"
+          "string\\\\\n"
+          "\"\"\""),
+
+    {ok,[{string,1,
+          "this contains \"quotes\"\n"
+          "and \"\"\"triple quotes\"\"\"\n"
+          " \"\" \"\"\" and\n"
+          "ends here"}],6} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "this contains \"quotes\"\n"
+          "and \"\"\"triple quotes\"\"\"\n"
+          " \"\" \"\"\" and\n"
+          "ends here\n"
+          "\"\"\""),
+
+    {ok,[{string,{1,1},
+          "```erlang\n"
+          "foo() ->\n"
+          "    \"\"\"\n"
+          "    foo\n"
+          "    bar\n"
+          "    \"\"\".\n"
+          "```"}],{9,5}} =
+        erl_scan:string(
+          "\"\"\"\"\n"
+          "```erlang\n"
+          "foo() ->\n"
+          "    \"\"\"\n"
+          "    foo\n"
+          "    bar\n"
+          "    \"\"\".\n"
+          "```\n"
+          "\"\"\"\"", {1,1}, []),
+
+    {ok,[{string,{1,1},"5-quoted"}],{3,8}} =
+        erl_scan:string(
+          "\"\"\"\"\"\n"
+          "  5-quoted\n"
+          "  \"\"\"\"\"", {1,1}, []),
+
+    {error,{{1,4},erl_scan,white_space},{2,4}} =
+        erl_scan:string(
+          "\"\"\"foo\n" % Only white-space allowed after opening quote seq
+          "\"\"\"", {1,1}, []),
+
+    {error,{{2,2},erl_scan,indentation},{3,6}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          " foo\n" % One space too little indentation
+          "  \"\"\"", {1,1}, []),
+
+    {error,{{2,8},erl_scan,indentation},{3,12}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "       \tfoo\n" % The tab shoud be a space
+          "        \"\"\"", {1,1}, []),
+
+    {error,{{1,4},erl_scan,{unterminated,{string,3},"\n\tx\n\t\"\""}},{3,4}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "\tx\n"
+          "\t\"\"", % Lacking one double-quote char in closing seq
+          {1,1}, []),
+
+    {error,{{3,4},erl_scan,string_concat},{3,4}} =
+        erl_scan:string(
+          "\"\"\"\n"
+          "x\n"
+          "\"\"\"\"",
+          %% Bad end delimiter: adjacent string start without white space
+          {1,1}, []),
+
+    {error,{{3,2},erl_scan,string_concat},{3,2}} =
+        erl_scan:string(
+          "\"\n"
+          "x\n"
+          "\"\"\"",
+          %% False triple-quote: adjacent string start without white space
+          {1,1}, []),
+
+    {error,{{1,6},erl_scan,string_concat},{1,6}} =
+        %% Adjacent string start without white space
+        erl_scan:string("\"abc\"\"def\"", {1,1}, []),
+
+    {ok,[{string,1,[16#D000]}],3} =
+        erl_scan:string(
+          [$",$",$",$\n,
+           16#D000,$\n, % Unicode character
+           $",$",$"]),
+
+    {error,{2,erl_scan,{illegal,character}},2} =
+        erl_scan:string(
+          [$",$",$",$\n,
+           16#FFFF,$\n, % Out of Unicode range
+           $",$",$"]),
+
+    %% Test the real deal in this source code
+    """"
+    ```erlang
+    foo() ->
+        """
+        \foo
+        \bar
+        """.
+    ```
+    """"
+        =
+        "```erlang
+foo() ->
+    \"\"\"
+    \\foo
+    \\bar
+    \"\"\".
+```",
+    ok.
+
 test_string(String, ExpectedWithCol) ->
     {ok, ExpectedWithCol, _EndWithCol} = erl_scan_string(String, {1, 1}, []),
     Expected = [ begin
@@ -1232,8 +1675,9 @@ erl_scan_string(String, StartLocation, Options) ->
     case erl_scan:string(String, StartLocation, Options) of
         {ok, Tokens, EndLocation} ->
             {ok, unopaque_tokens(Tokens), EndLocation};
-        Else ->
-            Else
+        {error,{_,Mod,Reason},_}=Error ->
+            Mod:format_error(Reason),
+            Error
     end.
 
 erl_scan_tokens(C, S, L) ->

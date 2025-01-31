@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2020-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2020-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,15 +33,15 @@ void BeamGlobalAssembler::emit_dispatch_return() {
     /* ARG3 already contains the place to jump to. */
 #endif
 
-    a.mov(x86::qword_ptr(c_p, offsetof(Process, current)), 0);
-    a.mov(x86::qword_ptr(c_p, offsetof(Process, arity)), 1);
+    a.mov(x86::qword_ptr(c_p, offsetof(Process, current)), imm(0));
+    a.mov(x86::byte_ptr(c_p, offsetof(Process, arity)), imm(1));
     a.jmp(labels[context_switch_simplified]);
 }
 
 void BeamModuleAssembler::emit_return() {
 #ifdef JIT_HARD_DEBUG
     /* Validate return address and {x,0} */
-    emit_validate(ArgVal(ArgVal::Word, 1));
+    emit_validate(ArgWord(1));
 #endif
 
     emit_leave_frame();
@@ -51,21 +51,18 @@ void BeamModuleAssembler::emit_return() {
     a.mov(getCPRef(), imm(NIL));
 #endif
 
+    if (erts_alcu_enable_code_atags) {
+        /* See emit_i_test_yield. */
+#if defined(NATIVE_ERLANG_STACK)
+        a.mov(ARG3, x86::qword_ptr(E));
+#endif
+        a.mov(x86::qword_ptr(c_p, offsetof(Process, i)), ARG3);
+    }
+
     /* The reduction test is kept in module code because moving it to a shared
      * fragment caused major performance regressions in dialyzer. */
     a.dec(FCALLS);
-
-    if (yieldReturn.isValid()) {
-        /* We're in an ordinary module. Reduce the code size by branching to
-         * the yield trampoline in the module header. */
-        a.jl(yieldReturn);
-    } else {
-        Label next = a.newLabel();
-
-        a.short_().jge(next);
-        abs_jmp(ga->get_dispatch_return());
-        a.bind(next);
-    }
+    a.jl(resolve_fragment(ga->get_dispatch_return()));
 
 #ifdef NATIVE_ERLANG_STACK
     a.ret();
@@ -74,34 +71,34 @@ void BeamModuleAssembler::emit_return() {
 #endif
 }
 
-void BeamModuleAssembler::emit_i_call(const ArgVal &CallDest) {
+void BeamModuleAssembler::emit_i_call(const ArgLabel &CallDest) {
     erlang_call(resolve_beam_label(CallDest), RET);
 }
 
-void BeamModuleAssembler::emit_i_call_last(const ArgVal &CallDest,
-                                           const ArgVal &Deallocate) {
+void BeamModuleAssembler::emit_i_call_last(const ArgLabel &CallDest,
+                                           const ArgWord &Deallocate) {
     emit_deallocate(Deallocate);
     emit_i_call_only(CallDest);
 }
 
-void BeamModuleAssembler::emit_i_call_only(const ArgVal &CallDest) {
+void BeamModuleAssembler::emit_i_call_only(const ArgLabel &CallDest) {
     emit_leave_frame();
 
     a.jmp(resolve_beam_label(CallDest));
 }
 
-/* Handles save_calls. Export entry is in RET.
+/* Handles save_calls for export entries. Export entry is in RET.
  *
  * When the active code index is ERTS_SAVE_CALLS_CODE_IX, all remote calls will
  * land here. */
-void BeamGlobalAssembler::emit_dispatch_save_calls() {
+void BeamGlobalAssembler::emit_dispatch_save_calls_export() {
     a.mov(TMP_MEM1q, RET);
 
     emit_enter_runtime();
 
     a.mov(ARG1, c_p);
     a.mov(ARG2, RET);
-    runtime_call<2>(save_calls);
+    runtime_call<void (*)(Process *, const Export *), save_calls>();
 
     emit_leave_runtime();
 
@@ -114,25 +111,25 @@ void BeamGlobalAssembler::emit_dispatch_save_calls() {
     a.jmp(emit_setup_dispatchable_call(RET, ARG1));
 }
 
-void BeamModuleAssembler::emit_i_call_ext(const ArgVal &Exp) {
-    make_move_patch(RET, imports[Exp.getValue()].patches);
+void BeamModuleAssembler::emit_i_call_ext(const ArgExport &Exp) {
+    mov_arg(RET, Exp);
     x86::Mem destination = emit_setup_dispatchable_call(RET);
     erlang_call(destination, ARG1);
 }
 
-void BeamModuleAssembler::emit_i_call_ext_only(const ArgVal &Exp) {
-    make_move_patch(RET, imports[Exp.getValue()].patches);
+void BeamModuleAssembler::emit_i_call_ext_only(const ArgExport &Exp) {
+    mov_arg(RET, Exp);
     x86::Mem destination = emit_setup_dispatchable_call(RET);
 
     emit_leave_frame();
     a.jmp(destination);
 }
 
-void BeamModuleAssembler::emit_i_call_ext_last(const ArgVal &Exp,
-                                               const ArgVal &Deallocate) {
+void BeamModuleAssembler::emit_i_call_ext_last(const ArgExport &Exp,
+                                               const ArgWord &Deallocate) {
     emit_deallocate(Deallocate);
 
-    make_move_patch(RET, imports[Exp.getValue()].patches);
+    mov_arg(RET, Exp);
     x86::Mem destination = emit_setup_dispatchable_call(RET);
 
     emit_leave_frame();
@@ -147,7 +144,7 @@ x86::Mem BeamModuleAssembler::emit_variable_apply(bool includeI) {
     align_erlang_cp();
     a.bind(entry);
 
-    emit_enter_runtime<Update::eReductions | Update::eStack | Update::eHeap>();
+    emit_enter_runtime<Update::eReductions | Update::eHeapAlloc>();
 
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG2);
@@ -160,9 +157,10 @@ x86::Mem BeamModuleAssembler::emit_variable_apply(bool includeI) {
 
     mov_imm(ARG4, 0);
 
-    runtime_call<4>(apply);
+    runtime_call<const Export *(*)(Process *, Eterm *, ErtsCodePtr, Uint),
+                 apply>();
 
-    emit_leave_runtime<Update::eReductions | Update::eStack | Update::eHeap>();
+    emit_leave_runtime<Update::eReductions | Update::eHeapAlloc>();
 
     a.test(RET, RET);
     a.short_().jne(dispatch);
@@ -177,7 +175,7 @@ void BeamModuleAssembler::emit_i_apply() {
     erlang_call(dest, ARG1);
 }
 
-void BeamModuleAssembler::emit_i_apply_last(const ArgVal &Deallocate) {
+void BeamModuleAssembler::emit_i_apply_last(const ArgWord &Deallocate) {
     emit_deallocate(Deallocate);
     emit_i_apply_only();
 }
@@ -189,7 +187,7 @@ void BeamModuleAssembler::emit_i_apply_only() {
     a.jmp(dest);
 }
 
-x86::Mem BeamModuleAssembler::emit_fixed_apply(const ArgVal &Arity,
+x86::Mem BeamModuleAssembler::emit_fixed_apply(const ArgWord &Arity,
                                                bool includeI) {
     Label dispatch = a.newLabel(), entry = a.newLabel();
 
@@ -198,7 +196,7 @@ x86::Mem BeamModuleAssembler::emit_fixed_apply(const ArgVal &Arity,
 
     mov_arg(ARG3, Arity);
 
-    emit_enter_runtime<Update::eReductions | Update::eStack | Update::eHeap>();
+    emit_enter_runtime<Update::eReductions | Update::eHeapAlloc>();
 
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG2);
@@ -211,9 +209,9 @@ x86::Mem BeamModuleAssembler::emit_fixed_apply(const ArgVal &Arity,
 
     mov_imm(ARG5, 0);
 
-    runtime_call<5>(fixed_apply);
-
-    emit_leave_runtime<Update::eReductions | Update::eStack | Update::eHeap>();
+    runtime_call<const Export *(*)(Process *, Eterm *, Uint, ErtsCodePtr, Uint),
+                 fixed_apply>();
+    emit_leave_runtime<Update::eReductions | Update::eHeapAlloc>();
 
     a.test(RET, RET);
     a.short_().jne(dispatch);
@@ -224,13 +222,13 @@ x86::Mem BeamModuleAssembler::emit_fixed_apply(const ArgVal &Arity,
     return emit_setup_dispatchable_call(RET);
 }
 
-void BeamModuleAssembler::emit_apply(const ArgVal &Arity) {
+void BeamModuleAssembler::emit_apply(const ArgWord &Arity) {
     x86::Mem dest = emit_fixed_apply(Arity, false);
     erlang_call(dest, ARG1);
 }
 
-void BeamModuleAssembler::emit_apply_last(const ArgVal &Arity,
-                                          const ArgVal &Deallocate) {
+void BeamModuleAssembler::emit_apply_last(const ArgWord &Arity,
+                                          const ArgWord &Deallocate) {
     emit_deallocate(Deallocate);
 
     x86::Mem dest = emit_fixed_apply(Arity, true);

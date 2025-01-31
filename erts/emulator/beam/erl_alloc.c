@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2002-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2002-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,6 @@
 #include "erl_db.h"
 #include "erl_binary.h"
 #include "erl_bits.h"
-#include "erl_mtrace.h"
 #include "erl_mseg.h"
 #include "erl_monitor_link.h"
 #include "erl_hl_timer.h"
@@ -80,6 +79,9 @@
 #define ERTS_ALC_DEFAULT_ACUL_EHEAP_ALLOC ERTS_ALC_DEFAULT_ENABLED_ACUL_EHEAP_ALLOC
 #define ERTS_ALC_DEFAULT_ACUL_LL_ALLOC ERTS_ALC_DEFAULT_ENABLED_ACUL_LL_ALLOC
 
+#define ERTS_ALC_DEFAULT_ENABLED_ACFUL ERTS_ALC_DEFAULT_ENABLED_ACUL - 20
+#define ERTS_ALC_DEFAULT_ENABLED_ACFUL_EHEAP_ALLOC ERTS_ALC_DEFAULT_ENABLED_ACUL_EHEAP_ALLOC - 20
+#define ERTS_ALC_DEFAULT_ENABLED_ACFUL_LL_ALLOC ERTS_ALC_DEFAULT_ENABLED_ACUL_LL_ALLOC - 20
 
 #ifdef DEBUG
 static Uint install_debug_functions(void);
@@ -183,7 +185,6 @@ struct au_init {
 }
 
 typedef struct {
-    int erts_alloc_config;
 #if HAVE_ERTS_MSEG
     ErtsMsegInit_t mseg;
 #endif
@@ -191,10 +192,6 @@ typedef struct {
     int top_pad;
     int dirty_alloc_insts;
     AlcUInit_t alloc_util;
-    struct {
-	char *mtrace;
-	char *nodename;
-    } instr;
     struct au_init sl_alloc;
     struct au_init std_alloc;
     struct au_init ll_alloc;
@@ -315,6 +312,7 @@ set_default_literal_alloc_opts(struct au_init *ip)
     ip->init.util.rsbcmt	= 0;
     ip->init.util.rmbcmt	= 0;
     ip->init.util.acul		= 0;
+    ip->init.util.acful		= 0;
 
 #if defined(ARCH_32)
 # if HAVE_ERTS_MSEG
@@ -597,6 +595,9 @@ adjust_carrier_migration_support(struct au_init *auip)
 	    auip->init.aoff.blk_order = FF_BF;
 	}
     }
+    if (auip->init.util.acful > auip->init.util.acul) {
+        auip->init.util.acful = auip->init.util.acul;
+    }
 }
 
 void
@@ -605,7 +606,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     UWord extra_block_size = 0;
     int i, ncpu;
     erts_alc_hndl_args_init_t init = {
-	0,
 #if HAVE_ERTS_MSEG
 	ERTS_MSEG_INIT_DEFAULT_INITIALIZER,
 #endif
@@ -659,9 +659,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     if (ncpu < 1)
 	ncpu = 1;
 
-    erts_tsd_key_create(&erts_allctr_prelock_tsd_key,
-			"erts_allctr_prelock_tsd_key");
-
     erts_sys_alloc_init();
     erts_init_utils_mem();
 
@@ -699,6 +696,7 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
 
     /* Make adjustments for carrier migration support */
     init.temp_alloc.init.util.acul = 0;
+    init.temp_alloc.init.util.acful = 0;
     adjust_carrier_migration_support(&init.sl_alloc);
     adjust_carrier_migration_support(&init.std_alloc);
     adjust_carrier_migration_support(&init.ll_alloc);
@@ -708,34 +706,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     adjust_carrier_migration_support(&init.driver_alloc);
     adjust_carrier_migration_support(&init.fix_alloc);
     adjust_carrier_migration_support(&init.literal_alloc);
-
-    if (init.erts_alloc_config) {
-	/* Adjust flags that erts_alloc_config won't like */
-
-	/* No thread specific instances */
-	init.temp_alloc.thr_spec = 0;
-	init.sl_alloc.thr_spec = 0;
-	init.std_alloc.thr_spec = 0;
-	init.ll_alloc.thr_spec = 0;
-	init.eheap_alloc.thr_spec = 0;
-	init.binary_alloc.thr_spec = 0;
-	init.ets_alloc.thr_spec = 0;
-	init.driver_alloc.thr_spec = 0;
-	init.fix_alloc.thr_spec = 0;
-        init.literal_alloc.thr_spec = 0;
-
-	/* No carrier migration */
-	init.temp_alloc.init.util.acul = 0;
-	init.sl_alloc.init.util.acul = 0;
-	init.std_alloc.init.util.acul = 0;
-	init.ll_alloc.init.util.acul = 0;
-	init.eheap_alloc.init.util.acul = 0;
-	init.binary_alloc.init.util.acul = 0;
-	init.ets_alloc.init.util.acul = 0;
-	init.driver_alloc.init.util.acul = 0;
-	init.fix_alloc.init.util.acul = 0;
-        init.literal_alloc.init.util.acul = 0;
-    }
 
     /* Only temp_alloc can use thread specific interface */
     if (init.temp_alloc.thr_spec)
@@ -772,7 +742,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     if (!init.temp_alloc.thr_spec)
 	refuse_af_strategy(&init.temp_alloc);
 
-    erts_mtrace_pre_init();
 #if HAVE_ERTS_MSEG
     init.mseg.nos = erts_no_schedulers;
     init.mseg.ndai = init.dirty_alloc_insts;
@@ -828,8 +797,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     sys_alloc_opt(SYS_ALLOC_OPT_TRIM_THRESHOLD, init.trim_threshold);
     sys_alloc_opt(SYS_ALLOC_OPT_TOP_PAD, init.top_pad);
 
-    erts_mtrace_init(init.instr.mtrace, init.instr.nodename);
-
     start_au_allocator(ERTS_ALC_A_TEMPORARY,
 		       &init.temp_alloc,
 		       &temp_alloc_state);
@@ -870,8 +837,6 @@ erts_alloc_init(int *argc, char **argv, ErtsAllocInitOpts *eaiop)
     start_au_allocator(ERTS_ALC_A_TEST,
 		       &init.test_alloc,
 		       &test_alloc_state);
-
-    erts_mtrace_install_wrapper_functions();
 
     init_aireq_alloc();
 
@@ -1288,6 +1253,30 @@ get_acul_value(struct au_init *auip, char *param_end, char** argv, int* ip)
     return (Uint) tmp;
 }
 
+static Uint
+get_acful_value(struct au_init *auip, char *param_end, char** argv, int* ip)
+{
+    Sint tmp;
+    char *rest;
+    char *param = argv[*ip]+1;
+    char *value = get_value(param_end, argv, ip);
+    if (sys_strcmp(value, "de") == 0) {
+	switch (auip->init.util.alloc_no) {
+	case ERTS_ALC_A_LONG_LIVED:
+	    return ERTS_ALC_DEFAULT_ENABLED_ACFUL_LL_ALLOC;
+	case ERTS_ALC_A_EHEAP:
+	    return ERTS_ALC_DEFAULT_ENABLED_ACFUL_EHEAP_ALLOC;
+	default:
+	    return ERTS_ALC_DEFAULT_ENABLED_ACFUL;
+	}
+    }
+    errno = 0;
+    tmp = (Sint) ErtsStrToSint(value, &rest, 10);
+    if (errno != 0 || rest == value || tmp < 0 || 100 < tmp)
+	bad_value(param, param_end, value);
+    return (Uint) tmp;
+}
+
 static void
 handle_au_arg(struct au_init *auip,
 	      char* sub_param,
@@ -1316,6 +1305,10 @@ handle_au_arg(struct au_init *auip,
             else if (has_prefix("acfml", sub_param)) {
                 value = get_amount_value(sub_param + 5, argv, ip);
                 wp = &auip->init.util.acfml;
+            }
+            else if (has_prefix("acful", sub_param)) {
+                value = get_acful_value(auip, sub_param + 5, argv, ip);
+                wp = &auip->init.util.acful;
             }
             else
                 goto bad_switch;
@@ -1383,10 +1376,40 @@ handle_au_arg(struct au_init *auip,
                     bad_value(param, sub_param + 1, alg);
                 }
 	    }
-	    if (!strategy_support_carrier_migration(auip))
+	    if (!strategy_support_carrier_migration(auip)) {
 		auip->init.util.acul = 0;
+		auip->init.util.acful = 0;
+            }
 	} else if (has_prefix("atags", sub_param)) {
-            auip->init.util.atags = get_bool_value(sub_param + 5, argv, ip);
+            char *param_end = &sub_param[5];
+            char *value;
+            
+            value = get_value(param_end, argv, ip);
+
+            if (sys_strcmp(value, "true") == 0) {
+                auip->init.util.atags = 1;
+            } else if (sys_strcmp(value, "false") == 0) {
+                auip->init.util.atags = 0;
+            } else if (sys_strcmp(value, "code") == 0) {
+                /* Undocumented option for point-of-origin tracking: overrides
+                 * per-pid/port tracking in favor of tracking which Erlang code
+                 * led to the allocation (best effort, but pretty accurate
+                 * under the JIT). */
+                auip->init.util.atags = 2;
+
+#if !defined(BEAMASM)
+                if (!erts_alcu_enable_code_atags) {
+                    erts_fprintf(stderr,
+                                 "WARNING: The experimental +M<S>atags code "
+                                 "flag is inaccurate under the interpreter. "
+                                 "Consider running with the JIT instead\n");
+                }
+#endif
+
+                erts_alcu_enable_code_atags = 1;
+            } else {
+                bad_value(sub_param, param_end, value);
+            }
         }
 	else
 	    goto bad_switch;
@@ -1516,6 +1539,7 @@ handle_au_arg(struct au_init *auip,
 	else if (res == 0) {
 	    auip->thr_spec = 0;
 	    auip->init.util.acul = 0;
+	    auip->init.util.acful = 0;
 	    break;
 	}
 	goto bad_switch;
@@ -1626,6 +1650,23 @@ handle_args(int *argc, char **argv, erts_alc_hndl_args_init_t *init)
 #endif
 			    get_amount_value(argv[i]+9, argv, &i);
 		    }
+		    else if (has_prefix("lp", argv[i]+3)) {
+                        char *param_end = argv[i]+5;
+			char *value = get_value(param_end, argv, &i);
+			if (sys_strcmp(value, "on") == 0) {
+#if HAVE_ERTS_MSEG
+			    init->mseg.dflt_mmap.lp = 1;
+			    init->mseg.literal_mmap.lp = 1;
+#endif
+			} else if (sys_strcmp(value, "off") == 0) {
+#if HAVE_ERTS_MSEG
+			    init->mseg.dflt_mmap.lp = 0;
+			    init->mseg.literal_mmap.lp = 0;
+#endif
+			} else {
+			    bad_value(param, param_end, value);
+			}
+		    }
 		    else {
 			bad_param(param, param+2);
 		    }
@@ -1700,9 +1741,6 @@ handle_args(int *argc, char **argv, erts_alc_hndl_args_init_t *init)
 			    for (a = 0; a < aui_sz; a++)
 				aui[a]->enable = 1;
 			}
-			else if (sys_strcmp("config", arg) == 0) {
-			    init->erts_alloc_config = 1;
-			}
 			else if (sys_strcmp("r9c", arg) == 0
 				 || sys_strcmp("r10b", arg) == 0
 				 || sys_strcmp("r11b", arg) == 0) {
@@ -1727,6 +1765,7 @@ handle_args(int *argc, char **argv, erts_alc_hndl_args_init_t *init)
 			    for (a = 0; a < aui_sz; a++) {
 				aui[a]->thr_spec = 0;
 				aui[a]->init.util.acul = 0;
+				aui[a]->init.util.acful = 0;
 				aui[a]->init.util.ramv = 0;
 				aui[a]->init.util.lmbcs = 5*1024*1024;
 			    }
@@ -1738,15 +1777,6 @@ handle_args(int *argc, char **argv, erts_alc_hndl_args_init_t *init)
 		    }
 		    default:
 			bad_param(param, param+1);
-		    }
-		    break;
-		case 'i':
-		    switch (argv[i][3]) {
-		    case 't':
-			init->instr.mtrace = get_value(argv[i]+4, argv, &i);
-			break;
-		    default:
-			bad_param(param, param+2);
 		    }
 		    break;
 		case 'l':
@@ -1818,18 +1848,6 @@ handle_args(int *argc, char **argv, erts_alc_hndl_args_init_t *init)
 	    case '-':
 		if (argv[i][2] == '\0') {
 		    /* End of system flags reached */
-		    if (init->instr.mtrace) {
-			while (i < *argc) {
-			    if(sys_strcmp(argv[i], "-sname") == 0
-			       || sys_strcmp(argv[i], "-name") == 0) {
-				if (i + 1 <*argc) {
-				    init->instr.nodename = argv[i+1];
-				    break;
-				}
-			    }
-			    i++;
-			}
-		    }
 		    goto args_parsed;
 		}
 		break;
@@ -2141,7 +2159,8 @@ alcu_size(ErtsAlcType_t alloc_no, ErtsAlcUFixInfo_t *fi, int fisz)
                     erts_alcu_foreign_size(allctr, alloc_no, &size);
                 }
 
-                ASSERT(((SWord)size.blocks) >= 0);
+                /* Sanity check of block size on 64-bit */
+                ASSERT(sizeof(UWord) == 4 || ((SWord)size.blocks) >= 0);
 
                 res += size.blocks;
             }
@@ -2474,6 +2493,7 @@ erts_memory(fmtfn_t *print_to_p, void *print_to_arg, void *proc, Eterm earg)
 	size.code += export_table_sz();
 	size.code += export_entries_sz();
 	size.code += erts_fun_table_sz();
+	size.code += erts_fun_entries_sz();
 	size.code += erts_ranges_sz();
 	size.code += erts_total_code_size;
     }
@@ -2620,6 +2640,11 @@ erts_allocated_areas(fmtfn_t *print_to_p, void *print_to_arg, void *proc)
     i++;
 
     values[i].arity = 2;
+    values[i].name = "fun_list";
+    values[i].ui[0] = erts_fun_entries_sz();
+    i++;
+
+    values[i].arity = 2;
     values[i].name = "module_refs";
     values[i].ui[0] = erts_ranges_sz();
     i++;
@@ -2637,11 +2662,6 @@ erts_allocated_areas(fmtfn_t *print_to_p, void *print_to_arg, void *proc)
     values[i].arity = 2;
     values[i].name = "node_table";
     values[i].ui[0] = erts_node_table_size();
-    i++;
-
-    values[i].arity = 2;
-    values[i].name = "bits_bufs_size";
-    values[i].ui[0] = erts_bits_bufs_size();
     i++;
 
     values[i].arity = 2;
@@ -2871,9 +2891,6 @@ erts_allocator_info(fmtfn_t to, void *arg)
 
     erts_print(to, arg, "=allocator:instr\n");
 
-    erts_print(to, arg, "option t: %s\n",
-	       erts_mtrace_enabled ? "true" : "false");
-
 }
 
 Eterm
@@ -2975,14 +2992,6 @@ erts_allocator_options(void *proc)
     terms[length++] = erts_mmap_info_options(&erts_dflt_mmapper, NULL, NULL,
                                              NULL, hpp, szp);
 #endif
-    {
-	Eterm o[1], v[1];
-	o[0] = ERTS_MAKE_AM("t");
-	v[0] = erts_mtrace_enabled ? am_true : am_false;
-
-	atoms[length] = ERTS_MAKE_AM("instr");
-	terms[length++] = erts_bld_2tup_list(hpp, szp, 1, o, v);
-    }
 
     atoms[length] = ERTS_MAKE_AM("lock_physical_memory");
     terms[length++] = (lock_all_physical_memory ? am_all : am_no);
@@ -3480,54 +3489,6 @@ badarg:
     ERTS_BIF_PREP_ERROR(res, c_p, EXC_BADARG);
     return res;
 }
-
-/* 
- * The allocator wrapper prelocking stuff below is about the locking order.
- * It only affects wrappers (erl_mtrace.c) that keep locks during
- * alloc/realloc/free.
- *
- * Some query functions in erl_alloc_util.c lock the allocator mutex and then
- * use erts_printf that in turn may call the sys allocator through the wrappers.
- * To avoid breaking locking order these query functions first "pre-locks" all
- * allocator wrappers.
- */
-ErtsAllocatorWrapper_t *erts_allctr_wrappers;
-int erts_allctr_wrapper_prelocked = 0;
-erts_tsd_key_t erts_allctr_prelock_tsd_key;
-
-void erts_allctr_wrapper_prelock_init(ErtsAllocatorWrapper_t* wrapper)
-{
-    ASSERT(wrapper->lock && wrapper->unlock);
-    wrapper->next = erts_allctr_wrappers;
-    erts_allctr_wrappers = wrapper;
-}
-
-void erts_allctr_wrapper_pre_lock(void)
-{
-    if (erts_allctr_wrappers) {
-	ErtsAllocatorWrapper_t* wrapper = erts_allctr_wrappers;
-	for ( ; wrapper; wrapper = wrapper->next) {
-	    wrapper->lock();
-	}
-	ASSERT(!erts_allctr_wrapper_prelocked);
-	erts_allctr_wrapper_prelocked = 1;
-	erts_tsd_set(erts_allctr_prelock_tsd_key, (void*)1);
-    }
-}
-
-void erts_allctr_wrapper_pre_unlock(void)
-{
-    if (erts_allctr_wrappers) {
-	ErtsAllocatorWrapper_t* wrapper = erts_allctr_wrappers;
-	
-	erts_allctr_wrapper_prelocked = 0;
-	erts_tsd_set(erts_allctr_prelock_tsd_key, (void*)0);
-	for ( ; wrapper; wrapper = wrapper->next) {
-	    wrapper->unlock();
-	}
-    }
-}
-
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
  * NOTE: erts_alc_test() is only supposed to be used for testing.            *
