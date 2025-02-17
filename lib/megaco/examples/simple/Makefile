@@ -1,7 +1,7 @@
 # 
 # %CopyrightBegin%
 # 
-# Copyright Ericsson AB 2001-2016. All Rights Reserved.
+# Copyright Ericsson AB 2001-2024. All Rights Reserved.
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,12 +60,14 @@ MEGACO_ROOT_DIR = $(shell (cd .. ; dirname `pwd`))
 # ----------------------------------------------------
 # FLAGS
 # ----------------------------------------------------
+
 ifeq ($(WARN_UNUSED_WARS),true)
 ERL_COMPILE_FLAGS += +warn_unused_vars
 endif
 
 ERL_COMPILE_FLAGS += \
 	-pa $(ERL_TOP)/lib/megaco/ebin \
+	+nowarn_missing_doc +nowarn_missing_spec_documented \
 	-I../../include
 
 ifneq ($(MGC_HOST),)
@@ -100,6 +102,22 @@ MGC_START_ARGS += "{debug,false}"
 endif
 
 
+DIA_PLT      = megaco_example_simple.plt
+DIA_ANALYSIS = $(basename $(DIA_PLT)).dialyzer_analysis
+ifeq ($(DIAW_EH),true)
+DIA_WARNINGS += -Werror_handling
+endif
+ifeq ($(DIAW_US),true)
+DIA_WARNINGS += -Wunderspecs
+endif
+ifeq ($(DIAW_UR),true)
+DIA_WARNINGS += -Wunmatched_returns
+endif
+DIA_PLT_APPS = \
+	erts asn1 et kernel stdlib compiler debugger \
+	runtime_tools crypto mnesia wx
+
+
 # ----------------------------------------------------
 # Targets
 # ----------------------------------------------------
@@ -114,8 +132,36 @@ clean:
 
 docs:
 
-info: 
+info:
 	@echo "MEGACO_ROOT_DIR = $(MEGACO_ROOT_DIR)"
+	@echo ""
+	@echo "DIA_PLT      = $(DIA_PLT)"
+	@echo "DIA_ANALYSIS = $(DIA_ANALYSIS)"
+	@echo "DIA_PLT_APPS = $(DIA_PLT_APPS)"
+	@echo ""
+
+
+dclean:
+	rm -f $(DIA_PLT)
+	rm -f $(DIA_ANALYSIS)
+
+dialyzer_plt: $(DIA_PLT)
+
+$(DIA_PLT): $(ERL_FILES)
+	@echo "Building $(basename $(DIA_PLT)) plt file"
+	@dialyzer --build_plt \
+                  --output_plt $@ \
+                  --apps --apps $(sort $(APPLICATION) $(DIA_PLT_APPS)) \
+                  --output $(DIA_ANALYSIS) \
+                  --verbose
+
+dialyzer: $(DIA_PLT)
+	@echo "Running dialyzer on megaco example simple"
+	@dialyzer --plt $< \
+                  -r ../../ebin \
+                  $(DIA_WARNINGS) \
+                  --verbose
+
 
 # ----------------------------------------------------
 # Special Build Targets

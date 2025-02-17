@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1999-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 %% %CopyrightEnd%
 %%
 -module(snmpa_vacm).
+-moduledoc false.
 
 -export([get_mib_view/5]).
 -export([init/1, init/2, backup/1]).
@@ -142,12 +143,16 @@ split_prefix(_, _) -> false.
 
 %% ViewName is including length from now on
 loop_mib_view(ViewName, Subtree, Indexes, MibView) ->
-    [{value, Mask}, {value, Type}, {value, Status}] = 
-	snmp_view_based_acm_mib:vacmViewTreeFamilyTable(
-	  get, Indexes,
-	  [?vacmViewTreeFamilyMask, 
-	   ?vacmViewTreeFamilyType,
-	   ?vacmViewTreeFamilyStatus]),
+    {Mask, Type, Status} =
+        case loop_mib_view_get(Indexes) of
+            [{value, M}, {value, T}, {value, S}] ->
+                {M, T, S};
+            Else ->
+                ?vinfo("Failed vacmViewTreeFamilyTable lookup:"
+                       "~n      Indexes: ~p"
+                       "~n      Result:  ~p", [Indexes, Else]),
+                exit(noSuchView)
+        end,
     NextMibView = 
 	case Status of
 	    ?'RowStatus_active' ->
@@ -169,6 +174,13 @@ loop_mib_view(ViewName, Subtree, Indexes, MibView) ->
 	    end
     end.
 
+loop_mib_view_get(Indexes) ->
+    Cols = [?vacmViewTreeFamilyMask, 
+            ?vacmViewTreeFamilyType,
+            ?vacmViewTreeFamilyStatus],
+    snmp_view_based_acm_mib:vacmViewTreeFamilyTable(get, Indexes, Cols).
+
+
 %%%-----------------------------------------------------------------
 %%%  1b.  The ordered ets table that implements vacmAccessTable
 %%%-----------------------------------------------------------------
@@ -176,6 +188,7 @@ loop_mib_view(ViewName, Subtree, Indexes, MibView) ->
 init(Dir) ->
     init(Dir, terminate).
 
+-dialyzer({no_opaque_union, [init/2]}).
 init(Dir, InitError) ->
     FName = filename:join(Dir, "snmpa_vacm.db"),
     case file:read_file_info(FName) of

@@ -1,7 +1,7 @@
 dnl -*-Autoconf-*-
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 1998-2021. All Rights Reserved.
+dnl Copyright Ericsson AB 1998-2024. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -30,11 +30,35 @@ dnl macros specific dnl to the Erlang system are prefixed ERL_ (this is
 dnl not always consistently made...).
 dnl
 
+dnl We check if -Werror was given on command line and if so
+dnl we disable it for the configure and only use it when
+dnl actually building erts
+AC_DEFUN([ERL_PUSH_WERROR],
+[
+no_werror_CFLAGS=$(echo " $CFLAGS " | sed 's/ -Werror / /g')
+if test "X $CFLAGS " != "X$no_werror_CFLAGS"; then
+   CFLAGS="$no_werror_CFLAGS"
+   WERRORFLAGS=-Werror
+fi])
+
+AC_DEFUN([ERL_POP_WERROR],
+[
+if test "x$GCC" = xyes; then
+    CFLAGS="$WERRORFLAGS $CFLAGS"
+fi])
+
 AC_DEFUN([ERL_CANONICAL_SYSTEM_TYPE],
 [
     AC_CANONICAL_HOST
     # Adjust for local legacy windows hack...
     AS_CASE([$host],
+            [local-aarch64-*-windows],
+            [
+                host=win32
+                host_os=win32
+                host_vendor=
+                host_cpu=aarch64
+            ],
             [local-*-windows],
             [
                 host=win32
@@ -46,6 +70,13 @@ AC_DEFUN([ERL_CANONICAL_SYSTEM_TYPE],
     AC_CANONICAL_BUILD
     # Adjust for local legacy windows hack...
     AS_CASE([$build],
+            [local-aarch64-*-windows],
+            [
+                build=win32
+                build_os=win32
+                build_vendor=
+                build_cpu=aarch64
+            ],
             [local-*-windows],
             [
                 build=win32
@@ -57,6 +88,13 @@ AC_DEFUN([ERL_CANONICAL_SYSTEM_TYPE],
     AC_CANONICAL_TARGET
     # Adjust for local legacy windows hack...
     AS_CASE([$target],
+            [local-aarch64-*-windows],
+            [
+                target=win32
+                target_os=win32
+                target_vendor=
+                target_cpu=aarch64
+            ],
             [local-*-windows],
             [
                 target=win32
@@ -65,17 +103,18 @@ AC_DEFUN([ERL_CANONICAL_SYSTEM_TYPE],
                 target_cpu=
             ])
 
-    AS_IF([test "$cross_compiling" = "yes" -a "$build" = "$host"],
+    AS_IF([test "$cross_compiling" = "yes" -a "$build" = "$host"  -a "$build_cpu" = "$host_cpu"],
           [AC_MSG_ERROR([
-           Cross compiling with the same canonicalized 'host' value
-           as the canonicalized 'build' value.
+           Cross compiling with the same canonicalized 'host' and 'host_cpu'
+           values as the canonicalized 'build' and 'build_cpu' values
 
            We are cross compiling since the '--host=$host_alias'
            and the '--build=$build_alias' arguments differ. When
            cross compiling Erlang/OTP, also the canonicalized values of
            the '--build' and the '--host' arguments *must* differ. The
            canonicalized values of these arguments however both equals:
-           $host
+           host = build = $host,
+           host_cpu = build_cpu = $host_cpu
 
            You can check the canonical value by passing a value as
            argument to the 'make/autoconf/config.sub' script.
@@ -103,12 +142,10 @@ AC_ARG_VAR(LIBS, [libraries])
 AC_ARG_VAR(DED_LD, [linker for Dynamic Erlang Drivers (set all DED_LD* variables or none)])
 AC_ARG_VAR(DED_LDFLAGS, [linker flags for Dynamic Erlang Drivers (set all DED_LD* variables or none)])
 AC_ARG_VAR(DED_LD_FLAG_RUNTIME_LIBRARY_PATH, [runtime library path linker flag for Dynamic Erlang Drivers (set all DED_LD* variables or none)])
-AC_ARG_VAR(LFS_CFLAGS, [large file support C compiler flags (set all LFS_* variables or none)])
-AC_ARG_VAR(LFS_LDFLAGS, [large file support linker flags (set all LFS_* variables or none)])
-AC_ARG_VAR(LFS_LIBS, [large file support libraries (set all LFS_* variables or none)])
 AC_ARG_VAR(RANLIB, [ranlib])
 AC_ARG_VAR(AR, [ar])
 AC_ARG_VAR(GETCONF, [getconf])
+AC_ARG_VAR(EX_DOC, [Path to ex_doc executable])
 
 dnl Cross system root
 AC_ARG_VAR(erl_xcomp_sysroot, [Absolute cross system root path (only used when cross compiling)])
@@ -756,14 +793,30 @@ esac
 
 AC_DEFUN(ERL_MONOTONIC_CLOCK,
 [
+  # CLOCK_MONOTONIC is buggy on MacOS (darwin), or at least on Big Sur
+  # and Monterey, since it may step backwards.
   if test "$3" = "yes"; then
-     default_resolution_clock_gettime_monotonic="CLOCK_HIGHRES CLOCK_BOOTTIME CLOCK_MONOTONIC"
-     low_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC_FAST"
-     high_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_PRECISE"
+     case $host_os in
+          darwin*)
+                default_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_RAW"
+                low_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_RAW_APPROX"
+                high_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_RAW";;
+          *)
+                default_resolution_clock_gettime_monotonic="CLOCK_HIGHRES CLOCK_BOOTTIME CLOCK_MONOTONIC"
+                low_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC_FAST"
+                high_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_PRECISE";;
+     esac
   else
-     default_resolution_clock_gettime_monotonic="CLOCK_HIGHRES CLOCK_UPTIME CLOCK_MONOTONIC"
-     low_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_COARSE CLOCK_UPTIME_FAST"
-     high_resolution_clock_gettime_monotonic="CLOCK_UPTIME_PRECISE"
+     case $host_os in
+          darwin*)
+                default_resolution_clock_gettime_monotonic="CLOCK_UPTIME_RAW"
+                low_resolution_clock_gettime_monotonic="CLOCK_UPTIME_RAW_APPROX"
+                high_resolution_clock_gettime_monotonic="CLOCK_UPTIME_RAW";;
+                *)
+                default_resolution_clock_gettime_monotonic="CLOCK_HIGHRES CLOCK_UPTIME CLOCK_MONOTONIC"
+                low_resolution_clock_gettime_monotonic="CLOCK_MONOTONIC_COARSE CLOCK_UPTIME_FAST"
+                high_resolution_clock_gettime_monotonic="CLOCK_UPTIME_PRECISE";;
+     esac
   fi
 
   case "$1" in
@@ -1399,6 +1452,9 @@ AC_DEFUN(ETHR_CHK_GCC_ATOMIC_OPS,
     ethr_arm_dbm_sy_instr_val=0
     ethr_arm_dbm_st_instr_val=0
     ethr_arm_dbm_ld_instr_val=0
+    ethr_arm_isb_sy_instr_val=0
+    ethr_arm_dc_cvau_instr_val=0
+    ethr_arm_ic_ivau_instr_val=0
     AS_CASE(
       ["$GCC-$host_cpu"],
       [yes-arm*|yes-aarch*],
@@ -1435,11 +1491,45 @@ AC_DEFUN(ETHR_CHK_GCC_ATOMIC_OPS,
 	    if test $ethr_cv_arm_dbm_ld_instr = yes; then
 		ethr_arm_dbm_ld_instr_val=1
 	    fi
+	    AC_CACHE_CHECK([for ARM 'isb sy' instruction], ethr_cv_arm_isb_sy_instr,
+			   [
+				ethr_cv_arm_isb_sy_instr=no
+				AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[
+						__asm__ __volatile__("isb sy\n" : : : "memory");
+					    ]])],[ethr_cv_arm_isb_sy_instr=yes],[])
+			   ])
+	    if test $ethr_cv_arm_isb_sy_instr = yes; then
+		ethr_arm_isb_sy_instr_val=1
+	    fi
+	    AC_CACHE_CHECK([for ARM 'dc cvau' instruction], ethr_cv_arm_dc_cvau_instr,
+			   [
+				ethr_cv_arm_dc_cvau_instr=no
+				AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[
+						char data[512]; __asm__ __volatile__("dc cvau, %0\n" :: "r" (data) : "memory");
+					    ]])],[ethr_cv_arm_dc_cvau_instr=yes],[])
+			   ])
+	    if test $ethr_cv_arm_dc_cvau_instr = yes; then
+		ethr_arm_dc_cvau_instr_val=1
+	    fi
+	    AC_CACHE_CHECK([for ARM 'ic ivau' instruction], ethr_cv_arm_ic_ivau_instr,
+			   [
+				ethr_cv_arm_ic_ivau_instr=no
+				AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[
+						char data[512]; __asm__ __volatile__("ic ivau, %0\n" :: "r" (data) : "memory");
+					    ]])],[ethr_cv_arm_ic_ivau_instr=yes],[])
+			   ])
+	    if test $ethr_cv_arm_ic_ivau_instr = yes; then
+		ethr_arm_ic_ivau_instr_val=1
+	    fi
       ])
 
     AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_DMB_INSTRUCTION], [$ethr_arm_dbm_sy_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'dmb sy' instruction, and are compiling for an ARM processor with ARM DMB instruction support, or not])
     AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_DMB_ST_INSTRUCTION], [$ethr_arm_dbm_st_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'dmb st' instruction, and are compiling for an ARM processor with ARM DMB instruction support, or not])
     AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_DMB_LD_INSTRUCTION], [$ethr_arm_dbm_ld_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'dmb ld' instruction, and are compiling for an ARM processor with ARM DMB instruction support, or not])
+    AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_ISB_SY_INSTRUCTION], [$ethr_arm_isb_sy_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'isb sy' instruction, and are compiling for an ARM processor with ARM ISB instruction support, or not])
+    AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_DC_CVAU_INSTRUCTION], [$ethr_arm_dc_cvau_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'dc cvau' instruction, and are compiling for an ARM processor with ARM DC instruction support, or not])
+    AC_DEFINE_UNQUOTED([ETHR_HAVE_GCC_ASM_ARM_IC_IVAU_INSTRUCTION], [$ethr_arm_ic_ivau_instr_val], [Define as a boolean indicating whether you have a gcc compatible compiler capable of generating the ARM 'ic ivau' instruction, and are compiling for an ARM processor with ARM IC instruction support, or not])
+
     test $ethr_cv_32bit___sync_val_compare_and_swap = yes &&
     	ethr_have_gcc_native_atomics=yes
     test $ethr_cv_64bit___sync_val_compare_and_swap = yes &&
@@ -1464,27 +1554,30 @@ AC_DEFUN(ETHR_CHK_GCC_ATOMIC_OPS,
 AC_DEFUN(ETHR_CHK_INTERLOCKED,
 [
     ilckd="$1"
-    AC_MSG_CHECKING([for ${ilckd}()])
     case "$2" in
 	"1") ilckd_call="${ilckd}(var);";;
 	"2") ilckd_call="${ilckd}(var, ($3) 0);";;
 	"3") ilckd_call="${ilckd}(var, ($3) 0, ($3) 0);";;
 	"4") ilckd_call="${ilckd}(var, ($3) 0, ($3) 0, arr);";;
     esac
-    have_interlocked_op=no
-    AC_LINK_IFELSE([AC_LANG_PROGRAM([[
-	#define WIN32_LEAN_AND_MEAN
-	#include <windows.h>
-	#include <intrin.h>
-	]], [[
-	    volatile $3 *var;
-	    volatile $3 arr[2];
+    AC_CACHE_CHECK([for ${ilckd}()],ethr_cv_have_$1,
+        [ethr_cv_have_$1=no
+         AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+	     #define WIN32_LEAN_AND_MEAN
+	     #include <windows.h>
+	     #include <intrin.h>
+	   ]], [[
+	     volatile $3 *var;
+	     volatile $3 arr[2];
 
-	    $ilckd_call
-	    return 0;
-	]])],[have_interlocked_op=yes],[])
-    test $have_interlocked_op = yes && $4
-    AC_MSG_RESULT([$have_interlocked_op])
+	      $ilckd_call
+	      return 0;
+	   ]])],[ethr_cv_have_$1=yes],[])])
+    if [[ "${ethr_cv_have_$1}" = "yes" ]]; then
+      $4
+    else
+      m4_default([$5], [:])
+    fi
 ])
 
 dnl ----------------------------------------------------------------------
@@ -1583,7 +1676,7 @@ esac
 LM_CHECK_THR_LIB
 ERL_INTERNAL_LIBS
 
-ERL_MONOTONIC_CLOCK(try_find_pthread_compatible, CLOCK_HIGHRES CLOCK_MONOTONIC, no)
+ERL_MONOTONIC_CLOCK(try_find_pthread_compatible, CLOCK_HIGHRES CLOCK_UPTIME_RAW CLOCK_MONOTONIC, no)
 
 case $erl_monotonic_clock_func in
   clock_gettime)
@@ -1671,13 +1764,15 @@ AS_CASE(
 	    ETHR_CHK_INTERLOCKED([_InterlockedAnd], [2], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDAND, 1, [Define if you have _InterlockedAnd()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedOr], [2], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDOR, 1, [Define if you have _InterlockedOr()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedExchange], [2], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDEXCHANGE, 1, [Define if you have _InterlockedExchange()]))
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange], [3], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE, 1, [Define if you have _InterlockedCompareExchange()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange_acq], [3], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE_ACQ, 1, [Define if you have _InterlockedCompareExchange_acq()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange_rel], [3], [long], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE_REL, 1, [Define if you have _InterlockedCompareExchange_rel()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange], [3], [long],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE, 1, [Define if you have _InterlockedCompareExchange()])
+               ethr_have_native_atomics=yes])
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange_acq], [3], [long],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE_ACQ, 1, [Define if you have _InterlockedCompareExchange_acq()])
+               ethr_have_native_atomics=yes])
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange_rel], [3], [long],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE_REL, 1, [Define if you have _InterlockedCompareExchange_rel()])
+              ethr_have_native_atomics=yes])
 	    ETHR_CHK_INTERLOCKED([_InterlockedDecrement64], [1], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDDECREMENT64, 1, [Define if you have _InterlockedDecrement64()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedDecrement64_rel], [1], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDDECREMENT64_REL, 1, [Define if you have _InterlockedDecrement64_rel()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedIncrement64], [1], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDINCREMENT64, 1, [Define if you have _InterlockedIncrement64()]))
@@ -1687,13 +1782,15 @@ AS_CASE(
 	    ETHR_CHK_INTERLOCKED([_InterlockedAnd64], [2], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDAND64, 1, [Define if you have _InterlockedAnd64()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedOr64], [2], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDOR64, 1, [Define if you have _InterlockedOr64()]))
 	    ETHR_CHK_INTERLOCKED([_InterlockedExchange64], [2], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDEXCHANGE64, 1, [Define if you have _InterlockedExchange64()]))
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64], [3], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64, 1, [Define if you have _InterlockedCompareExchange64()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64_acq], [3], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64_ACQ, 1, [Define if you have _InterlockedCompareExchange64_acq()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64_rel], [3], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64_REL, 1, [Define if you have _InterlockedCompareExchange64_rel()]))
-	    test "$have_interlocked_op" = "yes" && ethr_have_native_atomics=yes
-
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64], [3], [__int64],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64, 1, [Define if you have _InterlockedCompareExchange64()])
+               ethr_have_native_atomics=yes])
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64_acq], [3], [__int64],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64_ACQ, 1, [Define if you have _InterlockedCompareExchange64_acq()])
+               ethr_have_native_atomics=yes])
+	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange64_rel], [3], [__int64],
+              [AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE64_REL, 1, [Define if you have _InterlockedCompareExchange64_rel()])
+               ethr_have_native_atomics=yes])
 	    ETHR_CHK_INTERLOCKED([_InterlockedCompareExchange128], [4], [__int64], AC_DEFINE_UNQUOTED(ETHR_HAVE__INTERLOCKEDCOMPAREEXCHANGE128, 1, [Define if you have _InterlockedCompareExchange128()]))
 	fi
 	if test "$ethr_have_native_atomics" = "yes"; then
@@ -2523,6 +2620,15 @@ case "$with_clock_gettime_monotonic_id" in
    CLOCK_REALTIME*|CLOCK_TAI*)
      AC_MSG_ERROR([Invalid clock_gettime() monotonic clock id: Refusing to use the realtime clock id $with_clock_gettime_monotonic_id as monotonic clock id])
      ;;
+   CLOCK_MONOTONIC)
+     case $host_os in
+         darwin*)
+           # CLOCK_MONOTONIC is buggy on MacOS (darwin), or at least on Big Sur
+           # and Monterey, since it may step backwards.
+           AC_MSG_ERROR([Invalid clock_gettime() monotonic clock id: Refusing to use $with_clock_gettime_monotonic_id as monotonic clock id since it is buggy on MacOS]);;
+         *)
+           ;;
+     esac;;
    CLOCK_*)
      ;;
    *)
@@ -2636,15 +2742,6 @@ dnl
 AC_MSG_CHECKING([if gethrvtime works and how to use it])
 AC_RUN_IFELSE([AC_LANG_SOURCE([[
 /* gethrvtime procfs ioctl test */
-/* These need to be undef:ed to not break activation of
- * micro level process accounting on /proc/self 
- */
-#ifdef _LARGEFILE_SOURCE
-#  undef _LARGEFILE_SOURCE
-#endif
-#ifdef _FILE_OFFSET_BITS
-#  undef _FILE_OFFSET_BITS
-#endif
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -3009,6 +3106,9 @@ ERL_DED_FLAGS
 AC_DEFUN(ERL_DED_FLAGS,
          [
 
+# Large file support and 8-byte time_t by default
+AC_SYS_YEAR2038_RECOMMENDED
+
 USER_LD=$LD
 USER_LDFLAGS="$LDFLAGS"
 
@@ -3210,7 +3310,7 @@ AC_CHECK_TOOL(DED_LD, ld, false)
 test "$DED_LD" != "false" || AC_MSG_ERROR([No linker found])
 
 AC_MSG_CHECKING(for static compiler flags)
-DED_STATIC_CFLAGS="$DED_WERRORFLAGS $DED_WFLAGS $DED_THR_DEFS $DED_STATIC_CFLAGS"
+DED_STATIC_CFLAGS="$DED_WERRORFLAGS $DED_WARN_FLAGS $DED_THR_DEFS $DED_STATIC_CFLAGS"
 AC_MSG_RESULT([$DED_STATIC_CFLAGS])
 AC_MSG_CHECKING(for basic compiler flags for loadable drivers)
 DED_BASIC_CFLAGS=$DED_CFLAGS

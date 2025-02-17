@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2018-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2018-2025. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 %%
 
 -module(prim_socket).
+-moduledoc false.
 
 -compile(no_native).
 
@@ -35,7 +36,7 @@
     connect/1, connect/3,
     listen/2,
     accept/2,
-    send/4, sendto/4, sendto/5, sendmsg/4, sendmsg/5,
+    send/4, sendto/4, sendto/5, sendmsg/4, sendmsg/5, sendv/3,
     sendfile/4, sendfile/5, sendfile_deferred_close/1,
     recv/4, recvfrom/4, recvmsg/5,
     close/1, finalize_close/1,
@@ -49,6 +50,15 @@
 
 -export([enc_sockaddr/1, p_get/1]).
 
+-nifs([nif_info/0, nif_info/1, nif_supports/0, nif_supports/1, nif_command/1,
+       nif_open/2, nif_open/4, nif_bind/2, nif_connect/1, nif_connect/3,
+       nif_listen/2, nif_accept/2,
+       nif_send/4, nif_sendto/5, nif_sendmsg/5, nif_sendv/3,
+       nif_sendfile/5, nif_sendfile/4, nif_sendfile/1, nif_recv/4,
+       nif_recvfrom/4, nif_recvmsg/5, nif_close/1, nif_shutdown/2,
+       nif_setopt/5, nif_getopt/3, nif_getopt/4, nif_sockname/1,
+       nif_peername/1, nif_ioctl/2, nif_ioctl/3, nif_ioctl/4, nif_cancel/3,
+       nif_finalize_close/1]).
 
 %% Also in socket
 -define(REGISTRY, socket_registry).
@@ -89,6 +99,7 @@
 -define(ESOCK_OPT_OTP_FD,              1008).
 -define(ESOCK_OPT_OTP_META,            1009).
 -define(ESOCK_OPT_OTP_USE_REGISTRY,    1010).
+-define(ESOCK_OPT_OTP_SELECT_READ,     1011).
 %%
 -define(ESOCK_OPT_OTP_DOMAIN,          1999). % INTERNAL
 %%-define(ESOCK_OPT_OTP_TYPE,            1998). % INTERNAL
@@ -145,8 +156,9 @@ on_load(Extra) when is_map(Extra) ->
                         socket_debug => true,
                         debug_filename => enc_path(DebugFilename)}
           end,
-    ok = erlang:load_nif(atom_to_list(?MODULE), Extra_2),
-    %%
+    %% This will fail if the user has disabled esock support, making all NIFs
+    %% fall back to their Erlang implementation which throws `notsup`.
+    _ = erlang:load_nif(atom_to_list(?MODULE), Extra_2),
     init().
 
 init() ->
@@ -319,7 +331,15 @@ is_supported_option(_Option, undefined) ->
     false.
 
 is_supported(Key1) ->
-    get_is_supported(Key1, nif_supports()).
+    case Key1 of
+        ioctl_requests -> true;
+        ioctl_flags    -> true;
+        protocols      -> true;
+        options        -> true;
+        msg_flags      -> true;
+        _ ->
+            get_is_supported(Key1, nif_supports())
+    end.
 
 is_supported(ioctl_requests = Tab, Name) when is_atom(Name) ->
     p_get_is_supported(Tab, Name, fun (_) -> true end);
@@ -503,6 +523,10 @@ send(SockRef, Bin, EFlags, SendRef) when is_integer(EFlags) ->
         {select, Written} ->
             <<_:Written/binary, RestBin/binary>> = Bin,
             {select, RestBin, EFlags};
+
+        completion = C ->
+            C;
+
         {error, _Reason} = Result ->
             Result
     end;
@@ -549,11 +573,13 @@ sendto(SockRef, Bin, To, Flags, SendRef) ->
                         sockaddr ->
                             {error, {invalid, {Cause, To}}}
                     end;
+
                 ok ->
                     ok;
                 {ok, Written} ->
                     <<_:Written/binary, RestBin/binary>> = Bin,
                     {ok, RestBin};
+
                 select ->
                     Cont = {To, ETo, EFlags},
                     {select, Cont};
@@ -561,6 +587,10 @@ sendto(SockRef, Bin, To, Flags, SendRef) ->
                     <<_:Written/binary, RestBin/binary>> = Bin,
                     Cont = {To, ETo, EFlags},
                     {select, RestBin, Cont};
+
+                completion = C->
+                    C;
+
                 {error, _Reason} = Result ->
                     Result
             end
@@ -612,6 +642,7 @@ sendmsg_result(
             sendmsg_result(
               SockRef, RestIOV, Cont, SendRef, true,
               nif_sendmsg(SockRef, EMsg, EFlags, SendRef, RestIOV));
+
         select ->
             if
                 HasWritten ->
@@ -622,6 +653,11 @@ sendmsg_result(
         {select, Written} ->
             RestIOV = rest_iov(Written, IOV),
             {select, RestIOV, Cont};
+
+        %% Either the message was written or not. No half ways...
+        completion = C ->
+            C;
+
         {error, Reason} = Error->
             if
                 HasWritten ->
@@ -662,6 +698,48 @@ invalid_iov([H|IOV], N) ->
     end;
 invalid_iov(_, N) ->
     {improper_list, N}.
+
+
+sendv(SockRef, IOV, SendRef) ->
+    sendv_result(
+      SockRef, IOV, SendRef, false,
+      nif_sendv(SockRef, IOV, SendRef)).
+
+sendv_result(SockRef, IOV, SendRef, HasWritten, Result) ->
+    case Result of
+        ok ->
+            ok;
+
+        {ok, Written} ->
+            RestIOV = rest_iov(Written, IOV),
+            {ok, RestIOV};
+
+        {iov, Written} ->
+            RestIOV = rest_iov(Written, IOV),
+            sendv_result(
+              SockRef, RestIOV, SendRef, true,
+              nif_sendv(SockRef, RestIOV, SendRef));
+
+        select ->
+            if
+                HasWritten ->
+                    %% Cont is not used for sendv
+                    {select, IOV, undefined};
+                true ->
+                    {select, undefined}
+            end;
+        {select, Written} ->
+            RestIOV = rest_iov(Written, IOV),
+            %% Cont is not used for sendv
+            {select, RestIOV, undefined};
+
+        completion = C ->
+            C;
+
+        {error, _Reason} = Result ->
+            Result
+    end.
+
 
 sendfile(SockRef, Offset, Count, SendRef) ->
     nif_sendfile(SockRef, SendRef, Offset, Count).
@@ -1057,6 +1135,7 @@ enc_sockopt({otp = Level, Opt}, 0 = _NativeValue) ->
             fd                  -> ?ESOCK_OPT_OTP_FD;
             meta                -> ?ESOCK_OPT_OTP_META;
             use_registry        -> ?ESOCK_OPT_OTP_USE_REGISTRY;
+            select_read         -> ?ESOCK_OPT_OTP_SELECT_READ;
             domain              -> ?ESOCK_OPT_OTP_DOMAIN;
             _                   -> invalid
         end
@@ -1128,58 +1207,59 @@ p_get(Name) ->
 %% NIF functions
 %%
 
-nif_info() -> erlang:nif_error(undef).
-nif_info(_SockRef) -> erlang:nif_error(undef).
+nif_info() -> erlang:nif_error(notsup).
+nif_info(_SockRef) -> erlang:nif_error(notsup).
 
-nif_command(_Command) -> erlang:nif_error(undef).
+nif_command(_Command) -> erlang:nif_error(notsup).
 
-nif_supports() -> erlang:nif_error(undef).
-nif_supports(_Key) -> erlang:nif_error(undef).
+nif_supports() -> erlang:nif_error(notsup).
+nif_supports(_Key) -> erlang:nif_error(notsup).
 
-nif_open(_FD, _Opts) -> erlang:nif_error(undef).
-nif_open(_Domain, _Type, _Protocol, _Opts) -> erlang:nif_error(undef).
+nif_open(_FD, _Opts) -> erlang:nif_error(notsup).
+nif_open(_Domain, _Type, _Protocol, _Opts) -> erlang:nif_error(notsup).
 
-nif_bind(_SockRef, _SockAddr) -> erlang:nif_error(undef).
-nif_bind(_SockRef, _SockAddrs, _Action) -> erlang:nif_error(undef).
+nif_bind(_SockRef, _SockAddr) -> erlang:nif_error(notsup).
+nif_bind(_SockRef, _SockAddrs, _Action) -> erlang:nif_error(notsup).
 
-nif_connect(_SockRef) -> erlang:nif_error(undef).
-nif_connect(_SockRef, _ConnectRef, _SockAddr) -> erlang:nif_error(undef).
+nif_connect(_SockRef) -> erlang:nif_error(notsup).
+nif_connect(_SockRef, _ConnectRef, _SockAddr) -> erlang:nif_error(notsup).
 
-nif_listen(_SockRef, _Backlog) -> erlang:nif_error(undef).
+nif_listen(_SockRef, _Backlog) -> erlang:nif_error(notsup).
 
-nif_accept(_SockRef, _Ref) -> erlang:nif_error(undef).
+nif_accept(_SockRef, _Ref) -> erlang:nif_error(notsup).
 
-nif_send(_SockRef, _Bin, _Flags, _SendRef) -> erlang:nif_error(undef).
-nif_sendto(_SockRef, _Bin, _Dest, _Flags, _SendRef) -> erlang:nif_error(undef).
-nif_sendmsg(_SockRef, _Msg, _Flags, _SendRef, _IOV) -> erlang:nif_error(undef).
+nif_send(_SockRef, _Bin, _Flags, _SendRef) -> erlang:nif_error(notsup).
+nif_sendto(_SockRef, _Bin, _Dest, _Flags, _SendRef) -> erlang:nif_error(notsup).
+nif_sendmsg(_SockRef, _Msg, _Flags, _SendRef, _IOV) -> erlang:nif_error(notsup).
+nif_sendv(_SockRef, _IOVec, _SendRef) -> erlang:nif_error(notsup).
 
 nif_sendfile(_SockRef, _SendRef, _Offset, _Count, _InFileRef) ->
-    erlang:nif_error(undef).
+    erlang:nif_error(notsup).
 nif_sendfile(_SockRef, _SendRef, _Offset, _Count) ->
-    erlang:nif_error(undef).
-nif_sendfile(_SockRef) -> erlang:nif_error(undef).
+    erlang:nif_error(notsup).
+nif_sendfile(_SockRef) -> erlang:nif_error(notsup).
 
-nif_recv(_SockRef, _Length, _Flags, _RecvRef) -> erlang:nif_error(undef).
-nif_recvfrom(_SockRef, _Length, _Flags, _RecvRef) -> erlang:nif_error(undef).
+nif_recv(_SockRef, _Length, _Flags, _RecvRef) -> erlang:nif_error(notsup).
+nif_recvfrom(_SockRef, _Length, _Flags, _RecvRef) -> erlang:nif_error(notsup).
 nif_recvmsg(_SockRef, _BufSz, _CtrlSz, _Flags, _RecvRef) ->
-    erlang:nif_error(undef).
+    erlang:nif_error(notsup).
 
-nif_close(_SockRef) -> erlang:nif_error(undef).
-nif_finalize_close(_SockRef) -> erlang:nif_error(undef).
-nif_shutdown(_SockRef, _How) -> erlang:nif_error(undef).
+nif_close(_SockRef) -> erlang:nif_error(notsup).
+nif_finalize_close(_SockRef) -> erlang:nif_error(notsup).
+nif_shutdown(_SockRef, _How) -> erlang:nif_error(notsup).
 
-nif_setopt(_SockRef, _Lev, _Opt, _Val, _NativeVal) -> erlang:nif_error(undef).
-nif_getopt(_SockRef, _Lev, _Opt) -> erlang:nif_error(undef).
-nif_getopt(_SockRef, _Lev, _Opt, _ValSpec) -> erlang:nif_error(undef).
+nif_setopt(_SockRef, _Lev, _Opt, _Val, _NativeVal) -> erlang:nif_error(notsup).
+nif_getopt(_SockRef, _Lev, _Opt) -> erlang:nif_error(notsup).
+nif_getopt(_SockRef, _Lev, _Opt, _ValSpec) -> erlang:nif_error(notsup).
 
-nif_sockname(_SockRef) -> erlang:nif_error(undef).
-nif_peername(_SockRef) -> erlang:nif_error(undef).
+nif_sockname(_SockRef) -> erlang:nif_error(notsup).
+nif_peername(_SockRef) -> erlang:nif_error(notsup).
 
-nif_ioctl(_SockRef, _GReq)               -> erlang:nif_error(undef).
-nif_ioctl(_SockRef, _GReq, _Arg)         -> erlang:nif_error(undef).
-nif_ioctl(_SockRef, _SReq, _Arg1, _Arg2) -> erlang:nif_error(undef).
+nif_ioctl(_SockRef, _GReq)               -> erlang:nif_error(notsup).
+nif_ioctl(_SockRef, _GReq, _Arg)         -> erlang:nif_error(notsup).
+nif_ioctl(_SockRef, _SReq, _Arg1, _Arg2) -> erlang:nif_error(notsup).
 
-nif_cancel(_SockRef, _Op, _SelectRef) -> erlang:nif_error(undef).
+nif_cancel(_SockRef, _Op, _SelectRef) -> erlang:nif_error(notsup).
 
 
 %% ===========================================================================

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -702,12 +702,18 @@ decode_arg(N,#type{name="wxArrayInt"},_arg,Argc) ->
     w("    ~s.Add(~s_tmp);~n",[N,N]),
     w("  };~n",[]);
 
-decode_arg(N,#type{name=Type,base=binary,mod=Mod0},Arg,Argc) ->
+decode_arg(N,#type{name=Type,base=binary,mod=Mod0,by_val=Copy},Arg,Argc) ->
     Mod = mods(Mod0),
     wa("  ~s~s * ~s;~n",[Mod,Type,N], Arg),
     w("  ErlNifBinary ~s_bin;~n",[N]),
     w("  if(!enif_inspect_binary(env, ~s, &~s_bin)) ~s;~n",[Argc, N, badarg(N)]),
-    w("  ~s = (~s~s*) ~s_bin.data;~n", [N,Mod,Type,N]);
+    case Copy of
+        copy ->
+            w("  ~s = (unsigned char *) malloc(~s_bin.size);\n", [N,N]),
+            w("  memcpy(~s,~s_bin.data,~s_bin.size);\n", [N,N,N]);
+        _ ->
+            w("  ~s = (~s~s*) ~s_bin.data;~n", [N,Mod,Type,N])
+    end;
 
 decode_arg(N,#type{name=Type,base={term,_},single=Single,mod=Mod0},Arg,Argc) ->
     case Single of
@@ -1013,6 +1019,7 @@ call_arg(#param{name=N,in=true, def=Def,type=#type{name=Type, base=Base, single=
             N ++ ".data()"
     end;
 call_arg(#param{name=N,type=#type{by_val=true, single=_False}}) -> N;
+call_arg(#param{name=N,type=#type{by_val=copy, single=_False}}) -> N;
 call_arg(#param{name=N,in=true, def=Def,type=#type{base={comp,_,_},ref={pointer,1},single=true}}) ->
     case Def =:= none of
         true -> "&" ++ N;
@@ -1453,12 +1460,20 @@ gen_macros() ->
     w("#if wxUSE_WEBVIEW && wxUSE_WEBVIEW_IE~n"),
     w("#include <wx/msw/webview_ie.h>~n"),
     w("#endif~n"),
-
+    w("#if wxUSE_GLCANVAS_EGL && !wxCHECK_VERSION(3,2,3)~n"),
+    w("#include <EGL/egl.h>~n"),
+    w("#endif~n"),
 
     w("~n~n", []),
     w("#ifndef wxICON_DEFAULT_BITMAP_TYPE~n",[]),
     w("  #define wxICON_DEFAULT_BITMAP_TYPE wxBITMAP_TYPE_ICO_RESOURCE~n",[]),
     w("#endif~n", []),
+
+    w("~n~n", []),
+    w("#if defined(wxSTC_DISABLE_MACRO_DEPRECATIONS) && defined(wxSTC_DEPRECATED_MACRO_VALUE)~n",[]),
+    w("#undef wxSTC_DEPRECATED_MACRO_VALUE~n",[]),
+    w("#define wxSTC_DEPRECATED_MACRO_VALUE(value, msg) value~n",[]),
+    w("#endif~n",[]),
 
     %% [w("#define ~s_~s ~p~n", [Class,Name,Id]) ||
     %%     {Class,Name,_,Id} <- wx_gen_erl:get_unique_names()],

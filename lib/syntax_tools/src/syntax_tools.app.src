@@ -1,4 +1,5 @@
 % This is an -*- erlang -*- file.
+% SPDX-License-Identifier: Apache-2.0 OR LGPL-2.1-or-later
 
 {application, syntax_tools,
  [{description, "Syntax tools"},
@@ -16,4 +17,4 @@
   {applications, [stdlib]},
   {env, []},
   {runtime_dependencies,
-   ["compiler-7.0","erts-9.0","kernel-5.0","stdlib-3.4"]}]}.
+   ["compiler-@OTP-19422@","erts-@OTP-19422@","kernel-@OTP-19422@","stdlib-@OTP-19422@"]}]}.

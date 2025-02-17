@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2017-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2017-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 %% %CopyrightEnd%
 %%
 -module(prim_buffer).
+-moduledoc false.
 
 -export([on_load/0]).
 
@@ -33,6 +34,9 @@
 -export([find_byte_index/2]).
 
 -export([try_lock/1, unlock/1]).
+
+-nifs([new/0, size/1, peek_head/1, copying_read/2, write/2, skip/2,
+       find_byte_index/2, try_lock/1, unlock/1]).
 
 -type prim_buffer() :: term().
 

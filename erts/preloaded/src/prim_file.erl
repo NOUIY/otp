@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2000-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 %% %CopyrightEnd%
 %%
 -module(prim_file).
+-moduledoc false.
 
 -export([on_load/0]).
 
@@ -63,6 +64,17 @@
          internal_native2name/1,
          internal_normalize_utf8/1,
          is_translatable/1]).
+
+-nifs([open_nif/2, close_nif/1, read_nif/2, write_nif/2, pread_nif/3,
+       pwrite_nif/3, seek_nif/3, sync_nif/2, truncate_nif/1, allocate_nif/3,
+       advise_nif/4, read_handle_info_nif/1,
+       make_hard_link_nif/2, make_soft_link_nif/2, rename_nif/2,
+       read_info_nif/2, set_permissions_nif/2, set_owner_nif/3, set_time_nif/4,
+       read_link_nif/1, list_dir_nif/1, make_dir_nif/1, del_file_nif/1,
+       del_dir_nif/1, get_device_cwd_nif/1, set_cwd_nif/1, get_cwd_nif/0,
+       ipread_s32bu_p32bu_nif/3, read_file_nif/1,
+       get_handle_nif/1, delayed_close_nif/1, altname_nif/1,
+       file_desc_to_ref_nif/1]).
 
 -type prim_file_name() :: string() | unicode:unicode_binary().
 -type prim_file_name_error() :: 'error' | 'ignore' | 'warning'.
@@ -642,6 +654,8 @@ read_handle_info_1(Fd, TimeType) ->
         error:_ -> {error, badarg}
     end.
 
+adjust_times(FileInfo, posix) ->
+    FileInfo;
 adjust_times(FileInfo, TimeType) ->
     CTime = from_posix_seconds(FileInfo#file_info.ctime, TimeType),
     MTime = from_posix_seconds(FileInfo#file_info.mtime, TimeType),
@@ -866,8 +880,6 @@ is_path_translatable(Path) ->
 %% We want to use posix time in all prim but erl_prim_loader makes that tricky
 %% It is probably needed to redo the whole erl_prim_loader
 
-from_posix_seconds(Seconds, posix) when is_integer(Seconds) ->
-    Seconds;
 from_posix_seconds(Seconds, universal) when is_integer(Seconds) ->
     erlang:posixtime_to_universaltime(Seconds);
 from_posix_seconds(Seconds, local) when is_integer(Seconds) ->

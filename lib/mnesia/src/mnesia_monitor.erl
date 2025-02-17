@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 %%
 -module(mnesia_monitor).
+-moduledoc false.
 
 -behaviour(gen_server).
 
@@ -83,9 +84,9 @@
 		going_down = [], tm_started = false, early_connects = [],
 		connecting, mq = [], remote_node_status = []}).
 
--define(current_protocol_version,  {8,5}).
+-define(current_protocol_version,  {8,6}).
 
--define(previous_protocol_version, {8,4}).
+-define(previous_protocol_version, {8,5}).
 
 start() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE,
@@ -196,7 +197,7 @@ protocol_version() ->
 %% A sorted list of acceptable protocols the
 %% preferred protocols are first in the list
 acceptable_protocol_versions() ->
-    [protocol_version(), ?previous_protocol_version, {8,3}].
+    [protocol_version(), ?previous_protocol_version, {8,4}, {8,3}].
 
 needs_protocol_conversion(Node) ->
     case {?catch_val({protocol, Node}), protocol_version()} of
