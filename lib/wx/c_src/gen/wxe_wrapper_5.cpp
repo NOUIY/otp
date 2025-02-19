@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2008-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2008-2022. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1910,6 +1910,30 @@ void wxMenuBar_OSXGetAppleMenu(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
 }
 
 #endif
+#if defined(__WXMAC__)
+// wxMenuBar::MacGetCommonMenuBar
+void wxMenuBar_MacGetCommonMenuBar(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  wxMenuBar * Result = (wxMenuBar*)wxMenuBar::MacGetCommonMenuBar();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_ref(app->getRef((void *)Result,memenv), "wxMenuBar"));
+
+}
+
+#endif
+#if defined(__WXMAC__)
+// wxMenuBar::MacSetCommonMenuBar
+void wxMenuBar_MacSetCommonMenuBar(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMenuBar *menubar;
+  menubar = (wxMenuBar *) memenv->getPtr(env, argv[0], "menubar");
+  wxMenuBar::MacSetCommonMenuBar(menubar);
+
+}
+
+#endif
 // wxMenuBar::IsEnabled
 void wxMenuBar_IsEnabled(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
 {
@@ -2162,7 +2186,7 @@ void wxMenuItem_GetBitmap(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
   wxMenuItem *This;
   This = (wxMenuItem *) memenv->getPtr(env, argv[0], "This");
   if(!This) throw wxe_badarg("This");
-  const wxBitmap * Result = &This->GetBitmap();
+  wxBitmap * Result = new wxBitmap(This->GetBitmap()); app->newPtr((void *) Result,3, memenv);;
   wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
   rt.send(  rt.make_ref(app->getRef((void *)Result,memenv), "wxBitmap"));
 
@@ -3163,6 +3187,90 @@ void wxMouseEvent_GetWheelAxis(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
   int Result = This->GetWheelAxis();
   wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
   rt.send(  rt.make_int(Result));
+
+}
+
+// wxMouseEvent::Aux1DClick
+void wxMouseEvent_Aux1DClick(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux1DClick();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
+
+}
+
+// wxMouseEvent::Aux1Down
+void wxMouseEvent_Aux1Down(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux1Down();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
+
+}
+
+// wxMouseEvent::Aux1Up
+void wxMouseEvent_Aux1Up(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux1Up();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
+
+}
+
+// wxMouseEvent::Aux2DClick
+void wxMouseEvent_Aux2DClick(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux2DClick();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
+
+}
+
+// wxMouseEvent::Aux2Down
+void wxMouseEvent_Aux2Down(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux2Down();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
+
+}
+
+// wxMouseEvent::Aux2Up
+void wxMouseEvent_Aux2Up(WxeApp *app, wxeMemEnv *memenv, wxeCommand& Ecmd)
+{
+  ErlNifEnv *env = Ecmd.env;
+  ERL_NIF_TERM * argv = Ecmd.args;
+  wxMouseEvent *This;
+  This = (wxMouseEvent *) memenv->getPtr(env, argv[0], "This");
+  if(!This) throw wxe_badarg("This");
+  bool Result = This->Aux2Up();
+  wxeReturn rt = wxeReturn(memenv, Ecmd.caller, true);
+  rt.send(  rt.make_bool(Result));
 
 }
 

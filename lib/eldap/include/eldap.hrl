@@ -1,3 +1,6 @@
+%% SPDX-License-Identifier: MIT
+%% SPDX-FileCopyrightText: 2010 Torbjorn Tornkvist <tobbe@tornkvist.org>
+
 -ifndef( _ELDAP_HRL ).
 -define( _ELDAP_HRL , 1 ).
 
@@ -20,7 +23,8 @@
 %%%
 -record(eldap_search_result, {
 	  entries = [],          % List of #eldap_entry{} records
-	  referrals = []         % List of referrals
+	  referrals = [],        % List of referrals
+	  controls = []          % List of controls
 	  }).
 
 %%%

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 %%
 %% %CopyrightEnd%
 -module(test_server).
+-moduledoc false.
 
 -define(DEFAULT_TIMETRAP_SECS, 60).
 
@@ -43,7 +44,6 @@
 -export([peer_name/2, start_peer/3, start_peer/5]).
 -export([app_test/1, app_test/2, appup_test/1]).
 -export([comment/1, make_priv_dir/0]).
--export([os_type/0]).
 -export([run_on_shielded_node/2]).
 -export([is_cover/0,is_debug/0,is_commercial/0]).
 
@@ -348,8 +348,7 @@ stick_all_sticky(Node,Sticky) ->
 %% Returns a tuple with the time spent (in seconds) in the test case,
 %% the return value from the test case or an {'EXIT',Reason} if the case
 %% failed, Loc points out where the test case crashed (if it did). Loc
-%% is either the name of the function, or {<Module>,<Line>} of the last
-%% line executed that had a ?line macro. If the test case did execute
+%% is the name of the function. If the test case did execute
 %% erase/0 or similar, it may be empty. Comment is the last comment added
 %% by test_server:comment/1, the reason if test_server:fail has been
 %% called or the comment given by the return value {comment,Comment} from
@@ -468,7 +467,7 @@ run_test_case_msgloop(#st{ref=Ref,pid=Pid,end_conf_pid=EndConfPid0}=St0) ->
 	    From ! {self(),Tag,ok},
 	    run_test_case_msgloop(St);
 	{abort_current_testcase,_,_}=Abort when St0#st.status =:= starting ->
-	    %% we're in init phase, must must postpone this operation
+	    %% we're in init phase, must postpone this operation
 	    %% until test case execution is in progress (or FW:init_tc
 	    %% gets killed)
 	    self() ! Abort,
@@ -563,8 +562,16 @@ run_test_case_msgloop(#st{ref=Ref,pid=Pid,end_conf_pid=EndConfPid0}=St0) ->
 			handle_tc_exit(Reason, St0)
 		end,
 	    run_test_case_msgloop(St);
-	{EndConfPid0,{call_end_conf,Data,_Result}} ->
-	    #st{mf={Mod,Func},config=CurrConf} = St0,
+	{EndConfPid0,{call_end_conf,Data,EndConf,_Result}} ->
+            #st{mf={Mod,Func},config=CurrConfFromState} = St0,
+            CurrConf = case EndConf of
+                           [] ->
+                               %% use latest stored Config
+                               CurrConfFromState;
+                           _ ->
+                               %% use latest Config prepared in pre_end_per_testcase
+                               EndConf
+                       end,
 	    case CurrConf of
 		_ when is_list(CurrConf) ->
 		    {_Mod,_Func,TCPid,TCExitReason,Loc} = Data,
@@ -744,7 +751,7 @@ call_end_conf(Mod,Func,TCPid,TCExitReason,Loc,Conf,TVal) ->
     case erlang:function_exported(Mod,end_per_testcase,2) of
 	false ->
 	    spawn_link(fun() ->
-			       Starter ! {self(),{call_end_conf,Data,ok}}
+			       Starter ! {self(),{call_end_conf,Data,[],ok}}
 		       end);
 	true ->
 	    do_call_end_conf(Starter,Mod,Func,Data,TCExitReason,Conf,TVal)
@@ -778,15 +785,18 @@ do_call_end_conf(Starter,Mod,Func,Data,TCExitReason,Conf,TVal) ->
 				    print_end_conf_result(Mod,Func,Conf,
 							  "crashed",Error)
 			    end,
-			    Supervisor ! {self(),end_conf}
+			    Supervisor ! {self(),end_conf, EndConf}
 		    end,
 		Pid = spawn_link(EndConfApply),
 		receive
-		    {Pid,end_conf} ->
-			Starter ! {self(),{call_end_conf,Data,ok}};
+		    {Pid,end_conf, EndConf} ->
+                        %% Return EndConf to parent process to
+                        %% post_end_per_testcase callback can receive latest
+                        %% Config returned from pre_end_per_testcase
+			Starter ! {self(),{call_end_conf,Data,EndConf,ok}};
 		    {'EXIT',Pid,Reason} ->
 			print_end_conf_result(Mod,Func,Conf,"failed",Reason),
-			Starter ! {self(),{call_end_conf,Data,{error,Reason}}};
+			Starter ! {self(),{call_end_conf,Data,[],{error,Reason}}};
 		    {'EXIT',_OtherPid,Reason} ->
 			%% Probably the parent - not much to do about that
 			exit(Reason)
@@ -973,7 +983,7 @@ spawn_fw_call(Mod,Func,CurrConf,Pid,Error,Loc,SendTo) ->
                             {died, NewReturn, [{Mod,Func}]};
                         NewReturn ->
                             T = case Error of
-                                    {timetrap_timeout,TT} -> TT;
+                                    {timetrap_timeout,TT} -> TT/1000;
                                     _ -> 0
                                 end,
                             {T, NewReturn, Loc}
@@ -1791,7 +1801,7 @@ ts_tc(M, F, A) ->
 		     set_loc(Stk),
 		     case Type of
 			 throw ->
-			     {failed,{thrown,Reason}};
+			     {failed,{thrown,{Reason,Stk}}};
 			 error ->
 			     {'EXIT',{Reason,Stk}};
 			 exit ->
@@ -1865,22 +1875,14 @@ log(Msg) ->
     ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% capture_start() -> ok
-%% capture_stop() -> ok
-%%
-%% Starts/stops capturing all output from io:format, and similar. Capturing
-%% output doesn't stop output from happening. It just makes it possible
-%% to retrieve the output using capture_get/0.
-%% Starting and stopping capture doesn't affect already captured output.
-%% All output is stored as messages in the message queue until retrieved
+%% @see test_server_gl:capture_start/2
 
 capture_start() ->
-    group_leader() ! {capture,self()},
-    ok.
+    test_server_gl:capture_start(group_leader(), self()).
 
+%% @see test_server_gl:capture_stop/1
 capture_stop() ->
-    group_leader() ! {capture,false},
-    ok.
+    test_server_gl:capture_stop(group_leader()).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% capture_get() -> Output
@@ -1971,6 +1973,9 @@ adjusted_sleep(MSecs) ->
 %%
 %% Immediately calls exit. Included because test suites are easier
 %% to read when using this function, rather than exit directly.
+
+-spec fail(term()) -> no_return().
+
 fail(Reason) ->
     comment(cast_to_list(Reason)),
     try
@@ -1995,6 +2000,9 @@ cast_to_list(X) -> lists:flatten(io_lib:format("~tp", [X])).
 %%
 %% Immediately calls exit. Included because test suites are easier
 %% to read when using this function, rather than exit directly.
+
+-spec fail() -> no_return().
+
 fail() ->
     try
 	exit(suite_failed)
@@ -2581,9 +2589,7 @@ call_crash(Time,Crash,M,F,A) ->
 %%
 %% Slave and Peer:
 %% {remote, true}         - Start the node on a remote host. If not specified,
-%%                          the node will be started on the local host (with
-%%                          some exceptions, for instance VxWorks,
-%%                          where all nodes are started on a remote host).
+%%                          the node will be started on the local host.
 %% {args, Arguments}      - Arguments passed directly to the node.
 %% {cleanup, false}       - Nodes started with this option will not be killed
 %%                          by the test server after completion of the test case
@@ -2787,7 +2793,8 @@ peer_name(Module, TestCase) ->
     peer:random_name(lists:concat([Module, "-", TestCase])).
 
 %% Command line arguments passed
--spec start_peer([string()] | peer:start_options(), atom() | string(), TestCase :: atom() | string()) ->
+-spec start_peer([string()] | peer:start_options() | #{ start_cover => boolean() },
+                 atom() | string(), TestCase :: atom() | string()) ->
     {ok, gen_statem:server_ref(), node()} | {error, term()}.
 start_peer(Args, Module, TestCase) when is_list(Args) ->
     start_peer(#{args => Args, name => peer_name(Module, TestCase)}, Module);
@@ -2799,9 +2806,10 @@ start_peer(Opts, Module, TestCase) ->
     start_peer(Opts#{name => peer_name(Module, TestCase)}, Module).
 
 %% Release compatibility testing
--spec start_peer([string()] | peer:start_options(), atom() | string(), TestCase :: atom() | string(),
-    Release :: string(), OutDir :: file:filename()) ->
-        {ok, gen_statem:server_ref(), node()} | {error, term()} | not_available.
+-spec start_peer([string()] | peer:start_options() | #{ start_cover => boolean() },
+                 atom() | string(), TestCase :: atom() | string(),
+                 Release :: string(), OutDir :: file:filename()) ->
+          {ok, gen_statem:server_ref(), node()} | {error, term()} | not_available.
 start_peer(Args, Module, TestCase, Release, OutDir) when is_list(Args) ->
     start_peer(#{args => Args}, Module, TestCase, Release, OutDir);
 start_peer(Opts, Module, TestCase, Release, OutDir) ->
@@ -2809,13 +2817,12 @@ start_peer(Opts, Module, TestCase, Release, OutDir) ->
         not_available ->
             not_available;
         Erl ->
-            %% remove ERL_FLAGS/ERL_AFLAGS, because they may contain
-            %% "-emu_type debug" which does not exist for old releases. Keep "ERL_ZFLAGS",
-            %% for sometimes you might really need it...
-            Env = maps:get(env, Opts, []) ++ [{"ERL_AFLAGS", false}, {"ERL_FLAGS", false}],
+            %% remove ERL_AFLAGS, because they may contain "-emu_type debug" which does not exist
+            %% for old releases. Keep ERL_FLAGS, and ERL_ZFLAGS for sometimes you might need it...
+            Env = maps:get(env, Opts, []) ++ [{"ERL_AFLAGS", false}],
             NewArgs = ["-pa", peer_compile(Erl, code:which(peer), OutDir) | maps:get(args, Opts, [])],
-            start_peer(Opts#{exec => Erl, args => NewArgs,
-                env => Env}, Module, TestCase)
+            start_peer(Opts#{exec => Erl, args => NewArgs, env => Env,
+                             start_cover => false }, Module, TestCase)
     end.
 
 %% Internal implementation
@@ -2832,7 +2839,9 @@ start_peer(#{name := Name} = Opts, Module) ->
         end,
     FullArgs = CookieArg ++ ["-pa", filename:dirname(code:which(Module)),
         "-env", "ERL_CRASH_DUMP", CrashFile] ++ Args,
-    case test_server:is_cover() of
+    %% start_cover => false is intentionally undocumented, and is not
+    %%  expected to be used by anything but cover_SUITE test.
+    case maps:get(start_cover, Opts, true) andalso test_server:is_cover() of
         true ->
             %% when cover is active, node must shut down gracefully, otherwise
             %% coverage information won't be sent to cover master
@@ -2841,7 +2850,6 @@ start_peer(#{name := Name} = Opts, Module) ->
             Shutdown = binary_to_term(term_to_binary({10000, CoverMain})),
             case peer:start_link(Opts#{args => FullArgs, shutdown => Shutdown}) of
                 {ok, Peer, Node} ->
-                    do_cover_for_node(Node, start),
                     {ok, Peer, Node};
                 Other ->
                     Other
@@ -2858,13 +2866,14 @@ peer_compile(Erl, cover_compiled, OutDir) ->
 peer_compile(Erl, ModPath, OutDir) ->
     {ok, ModSrc} = filelib:find_source(ModPath),
     Erlc = filename:join(filename:dirname(Erl), "erlc"),
-    cmd(Erlc, ["-o", OutDir, ModSrc]),
+    cmd(Erlc, ["-o", OutDir, unicode:characters_to_binary(ModSrc)]),
     OutDir.
 
 %% This should really be implemented as os:cmd.
 cmd(Exec, Args) ->
-    %% remove all ERL_FLAGS/ERL_AFLAGS to drop "-emu_type debug"
-    Env = [{"ERL_AFLAGS", false}, {"ERL_FLAGS", false}],
+    %% remove all ERL_AFLAGS to drop "-emu_type debug" and similar
+    %% remote ERLC_COMPILE_SERVER because of a bug in pre 25.2 Erlang/OTP
+    Env = [{"ERL_AFLAGS", false},{"ERLC_USE_SERVER",false}],
     Port = open_port({spawn_executable, Exec}, [{args, Args}, {env, Env},
         stream, binary, exit_status, stderr_to_stdout]),
     read_std(Port, lists:join(" ", [Exec|Args]), <<>>).
@@ -3021,15 +3030,6 @@ read_comment() ->
 %% for the current test case.
 make_priv_dir() ->
     tc_supervisor_req(make_priv_dir).
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% os_type() -> OsType
-%%
-%% Returns the OsType of the target node. OsType is
-%% the same as returned from os:type()
-os_type() ->
-    os:type().
-
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% is_cover() -> boolean()

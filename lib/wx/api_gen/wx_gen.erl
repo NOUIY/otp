@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ safe(What, QuitOnErr) ->
     catch Err:Reason:Stacktrace ->
 	    io:format("Error in ~p ~p~n", [get(current_class),get(current_func)]),
 	    %%erlang:display({Err,Reason,Stacktrace}),
-            io:format("~p:~p:~n ~p~n~n",[Err,Reason,Stacktrace]),
+            io:format("~p:~P:~n ~p~n~n",[Err,Reason, 30, Stacktrace]),
 	    catch gen_util:close(),
             timer:sleep(1500),
 	    QuitOnErr andalso gen_util:halt(1)
@@ -69,7 +69,7 @@ gen_code() ->
     Defs = translate_enums(Defs2),
     wx_gen_erl:gen(Defs),
     wx_gen_nif:gen(Defs),
-    wx_gen_doc:gen(Defs),
+    %% wx_gen_doc:gen(Defs),
     ok.
 
 -record(hs,{alias,skip,fs,fopt,ev,acc,info}).
@@ -467,7 +467,7 @@ parse_member(Data,MType,Virtual,Opts = #hs{fopt=Fopts}) ->
 	     end, PS2),
     Alias = find_erl_alias_name(MName,PS,Fopts),
     FOpts = find_func_options(MName, PS2, Fopts),
-    %% ?DBGCF("wxTopLevelWindow", "ShowFullScreen", "~p~n", [Method#method.doc]),
+    %% ?DBGCF("wxImage", "SetAlpha", "~p~n", [PS]),
     Method#method{params=PS, alias=Alias, opts=FOpts}.
 
 
@@ -614,6 +614,7 @@ handle_param_opt({skip_member, Type}, P) ->
 handle_param_opt({erl_func,_Name}, P) -> P;  %% Handled elsewhere
 handle_param_opt(in, P) -> P#param{in=true};
 handle_param_opt(out, P) -> P#param{in=false};
+handle_param_opt(copy, P=#param{type=T}) ->  P#param{type=T#type{by_val=copy}};
 handle_param_opt(both, P) -> P#param{in=both};
 handle_param_opt({def,Def},P) -> P#param{def=Def};
 handle_param_opt({type,Type}, P=#param{type=T})  ->  P#param{type=T#type{name=Type}};

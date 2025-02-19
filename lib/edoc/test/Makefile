@@ -26,7 +26,8 @@ RELSYSDIR = $(RELEASE_PATH)/edoc_test
 # ----------------------------------------------------
 
 ERL_MAKE_FLAGS += 
-ERL_COMPILE_FLAGS +=
+ERL_COMPILE_FLAGS += +nowarn_missing_spec_documented
+ERL_COMPILE_FLAGS := $(filter-out +deterministic,$(ERL_COMPILE_FLAGS))
 
 EBIN = .
 

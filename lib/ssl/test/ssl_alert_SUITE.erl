@@ -22,6 +22,7 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
@@ -29,6 +30,8 @@
 
 %% Common test
 -export([all/0,
+         init_per_suite/1,
+         end_per_suite/1,
          init_per_testcase/2,
          end_per_testcase/2
         ]).
@@ -39,7 +42,8 @@
          alert_details/0,
          alert_details/1,
          alert_details_not_too_big/0,
-         alert_details_not_too_big/1
+         alert_details_not_too_big/1,
+         bad_connect_response/1
         ]).
 
 %%--------------------------------------------------------------------
@@ -49,9 +53,23 @@ all() ->
     [
      alerts,
      alert_details,
-     alert_details_not_too_big
+     alert_details_not_too_big,
+     bad_connect_response
     ].
 
+init_per_suite(Config0) ->
+    catch application:stop(crypto),
+    try application:start(crypto) of
+	ok ->
+            ssl_test_lib:clean_start(),
+            Config0
+    catch _:_ ->
+	    {skip, "Crypto did not start"}
+    end.
+
+end_per_suite(_Config) ->
+    ssl:stop(),
+    application:stop(crypto).
 init_per_testcase(_TestCase, Config) ->
     ct:timetrap({seconds, 5}),
     Config.
@@ -66,7 +84,7 @@ alerts() ->
     [{doc, "Test ssl_alert formatting code"}].
 alerts(Config) when is_list(Config) ->
     Descriptions = [?CLOSE_NOTIFY, ?UNEXPECTED_MESSAGE, ?BAD_RECORD_MAC,
-		    ?DECRYPTION_FAILED_RESERVED, ?RECORD_OVERFLOW, ?DECOMPRESSION_FAILURE,
+		    ?DECRYPTION_FAILED_RESERVED, ?RECORD_OVERFLOW,
 		    ?HANDSHAKE_FAILURE, ?BAD_CERTIFICATE, ?UNSUPPORTED_CERTIFICATE,
 		    ?CERTIFICATE_REVOKED,?CERTIFICATE_EXPIRED, ?CERTIFICATE_UNKNOWN,
 		    ?ILLEGAL_PARAMETER, ?UNKNOWN_CA, ?ACCESS_DENIED, ?DECODE_ERROR,
@@ -116,7 +134,51 @@ alert_details_not_too_big(Config) when is_list(Config) ->
                                                                                      line => 1710}}, server, "TLS", cipher),
     case byte_size(term_to_binary(Txt)) < (byte_size(term_to_binary(ReasonText)) - PrefixLen) of
         true ->
-            ct:pal("~s", [Txt]);
+            ?CT_LOG("~s", [Txt]);
         false ->
             ct:fail(ssl_alert_text_too_big)
     end.
+
+%%--------------------------------------------------------------------
+bad_connect_response(_Config) ->
+    Me = self(),
+    spawn_link(fun() -> echo_server_init(Me) end),
+    Port = receive {port, P} -> P end,
+    application:ensure_all_started(ssl),
+    ok = check_response(catch ssl:connect("localhost", Port, [{versions, ['tlsv1.3']},
+                                                              {verify, verify_none}])),
+    ok = check_response(catch ssl:connect("localhost", Port, [{versions, ['tlsv1.2']},
+                                                              {verify, verify_none}])),
+    ok = check_response(catch ssl:connect("localhost", Port, [{versions, ['tlsv1.1']},
+                                                              {verify, verify_none}])),
+    ok.
+
+check_response({error, {tls_alert, {unexpected_message, _}}}) ->
+    ok;
+check_response({error, {options, {insufficient_crypto_support,_}}}) ->
+    ok;
+check_response(What) ->
+    ?CT_PAL("RES: ~p~n", [What]),
+    What.
+
+echo_server_init(Tester) ->
+    {ok, Listen} = gen_tcp:listen(0, [{active, true}, binary]),
+    {ok, Port} = inet:port(Listen),
+    Tester ! {port, Port},
+    {ok, Socket} = gen_tcp:accept(Listen),
+    echo_server(Socket, Listen).
+
+echo_server(Socket, Listen) ->
+    receive
+        {tcp, Socket, Bin} when is_binary(Bin) ->
+            gen_tcp:send(Socket, Bin),
+            echo_server(Socket, Listen);
+        {tcp_closed, Socket} ->
+            {ok, New} = gen_tcp:accept(Listen),
+            echo_server(New, Listen);
+        Msg ->
+            ?CT_PAL("Server: ~p~n", [Msg]),
+            echo_server(Socket, Listen)
+    end.
+
+

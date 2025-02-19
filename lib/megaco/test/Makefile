@@ -1,7 +1,7 @@
 # 
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 1999-2020. All Rights Reserved.
+# Copyright Ericsson AB 1999-2024. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -85,10 +85,12 @@ ifeq ($(USE_MEGACO_TEST_CODE),true)
 ERL_COMPILE_FLAGS += -DMEGACO_TEST_CODE=mona_lisa_spelar_doom
 endif
 
-ERL_COMPILE_FLAGS += $(MEGACO_ERL_COMPILE_FLAGS)
+ERL_COMPILE_FLAGS += $(MEGACO_ERL_COMPILE_FLAGS) +nowarn_missing_spec_documented
 
 # We have a behaviour in the test catalog (megaco_test_generator)
 ERL_COMPILE_FLAGS += -pa ../../megaco/test
+
+ERL_COMPILE_FLAGS := $(filter-out +deterministic,$(ERL_COMPILE_FLAGS))
 
 ERL_PATH = -pa ../../megaco/examples/simple \
            -pa ../../megaco/ebin \

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2005-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 -include_lib("common_test/include/ct_event.hrl").
 
 -export([all/0, suite/0, groups/0,
+         init_per_testcase/2, end_per_testcase/2,
          test_size/1,flat_size_big/1,df/1,term_type/1,
          instructions/1, stack_check/1, alloc_blocks_size/1,
          t_copy_shared/1,
@@ -42,6 +43,11 @@ all() ->
 
 groups() -> 
     [{interpreter_size_bench, [], [interpreter_size_bench]}].
+
+init_per_testcase(_TestCase, Config) ->
+    Config.
+end_per_testcase(_TestCase, Config) ->
+    erts_test_utils:ept_check_leaked_nodes(Config).
 
 interpreter_size_bench(_Config) ->
     Size = erts_debug:interpreter_size(),
@@ -76,7 +82,10 @@ test_size(Config) when is_list(Config) ->
 
     %% Fun environment size = 0 (the smallest fun possible)
     SimplestFun = fun() -> ok end,
-    FunSz0 = 6,
+
+    %% Funs without environment occupy 2 words, and are stored off-heap as long
+    %% as their defining module is loaded.
+    FunSz0 = 2,
     FunSz0 = do_test_size(SimplestFun),
 
     %% Fun environment size = 1
@@ -89,8 +98,9 @@ test_size(Config) when is_list(Config) ->
 
     FunSz1 = do_test_size(fun() -> ConsCell1 end) - do_test_size(ConsCell1),
 
-    %% External funs are the same size as local ones without environment
-    FunSz0 = do_test_size(fun lists:sort/1),
+    %% External funs, which always lack environment, occupy 2 words and are
+    %% always stored off-heap.
+    2 = do_test_size(fun lists:sort/1),
 
     Arch = 8 * erlang:system_info({wordsize, external}),
     case {Arch, do_test_size(mk_ext_pid({a@b, 1}, 17, 42))} of
@@ -116,9 +126,9 @@ test_size(Config) when is_list(Config) ->
 	{32, 18} -> ok;
 	{64, 10} -> ok
     end,
-    6 = do_test_size(<<0:(8*65)>>),    % ProcBin
-    8 = do_test_size(<<5:7>>),         % ErlSubBin + ErlHeapBin
-    11 = do_test_size(<<0:(8*80+1)>>), % ErlSubBin + ProcBin
+    8 = do_test_size(<<0:(8*65)>>),    % ErlSubBits + BinRef
+    3 = do_test_size(<<5:7>>),         % ErlHeapBits
+    8 = do_test_size(<<0:(8*80+1)>>),  % ErlSubBits + BinRef
 
     %% Test shared data structures.
     do_test_size([ConsCell1|ConsCell1],
@@ -180,8 +190,8 @@ term_type(Config) when is_list(Config) ->
           {hfloat, -1.0e18},
 
           {heap_binary, <<1,2,3>>},
-          {refc_binary, <<0:(8*80)>>},
-          {sub_binary,  <<5:7>>},
+          {sub_binary, <<0:(8*80)>>},
+          {heap_binary, <<5:7>>},
 
           {flatmap, #{ a => 1}},
           {hashmap, maps:from_list([{I,I}||I <- lists:seq(1,76)])},

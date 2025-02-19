@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 
 %% @hidden
 -module(wxe_master).
+-moduledoc false.
 -behaviour(gen_server).
 
 %% API
@@ -80,8 +81,9 @@ init_opengl() ->
     case get(wx_init_opengl) of
         true -> {ok, "already  initialized"};
         _ ->
-            Opaque = gl:lookup_func(),
-            {ok, wxe_util:init_opengl(Opaque)}
+            Opaque = gl:lookup_func(functions),
+            Debug = gl:lookup_func(function_names),
+            {ok, wxe_util:init_opengl(Opaque, Debug)}
     end.
 
 %%--------------------------------------------------------------------
@@ -123,7 +125,8 @@ init([SilentStart]) ->
         wxe_util:setup_consts(),
 	{ok, #state{}}
     catch _:Error:ST ->
-            io:format("Error: ~p @ ~p~n",[Error, ST]),
+            Str = io_lib:format("Error: ~p @ ~p~n",[Error, ST]),
+            logger:log(error, Str, #{domain => [wx]}),
 	    error({error, {Error, "Could not initiate graphics"}})
     end.
 
@@ -167,13 +170,13 @@ handle_cast(_Msg, State) ->
 %% Description: Handling all non call/cast messages
 %%--------------------------------------------------------------------
 handle_info({wxe_driver, error, Msg}, State) ->
-    error_logger:error_report([{wx, error}, {message, lists:flatten(Msg)}]),
+    logger:log(error, "wx: ~s", [Msg], #{domain => [wx]}),
     {noreply, State};
 handle_info({wxe_driver, internal_error, Msg}, State) ->
-    error_logger:error_report([{wx, internal_error}, {message, lists:flatten(Msg)}]),
+    logger:log(error, "wx: ~s", [Msg], #{domain => [wx]}),
     {noreply, State};
 handle_info({wxe_driver, debug, Msg}, State) ->
-    io:format("WX DBG: ~s~n", [Msg]),
+    logger:log(notice, "wx: ~s", [Msg], #{domain => [wx]}),
     {noreply, State};
 handle_info({wxe_driver, Cmd, File}, State = #state{subscribers=Subs, msgs=Msgs}) 
   when Cmd =:= open_file; Cmd =:= new_file; Cmd =:= print_file; 
@@ -183,8 +186,8 @@ handle_info({wxe_driver, Cmd, File}, State = #state{subscribers=Subs, msgs=Msgs}
 handle_info({'DOWN', _Ref, process, Pid, _Info}, State) ->
     Subs = State#state.subscribers -- [Pid],
     {noreply, State#state{subscribers=Subs}};
-handle_info(_Info, State) ->
-    io:format("Unknown message ~p sent to ~p~n",[_Info, ?MODULE]),
+handle_info(Info, State) ->
+    logger:log(notice, "wx: Unexpected Msg: ~p", [Info], #{domain => [wx], line=>?LINE, file=>?MODULE_STRING}),
     {noreply, State}.
 
 %%--------------------------------------------------------------------

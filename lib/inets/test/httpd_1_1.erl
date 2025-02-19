@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2005-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2022. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -244,7 +244,7 @@ head(Type, Port, Host, Node)->
 			 [{statuscode, 200}]),
     %% mod_cgi
     Script =
-	case test_server:os_type() of
+	case os:type() of
 	    {win32, _} ->
 		"printenv.bat";
 	    _ ->

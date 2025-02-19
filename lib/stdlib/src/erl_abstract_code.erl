@@ -1,4 +1,7 @@
+% SPDX-License-Identifier: Apache-2.0
+
 -module(erl_abstract_code).
+-moduledoc false.
 -export([debug_info/4]).
 
 debug_info(_Format, _Module, {none,_CompilerOpts}, _Opts) ->

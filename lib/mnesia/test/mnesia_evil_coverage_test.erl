@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,8 +29,8 @@
 
 -export([system_info/1, table_info/1, error_description/1,
          db_node_lifecycle/1, evil_delete_db_node/1, start_and_stop/1,
-         checkpoint/1, table_lifecycle/1, storage_options/1,
-         add_copy_conflict/1, add_copy_when_going_down/1,
+         checkpoint/1, checkpoint_del_table/1, table_lifecycle/1, storage_options/1,
+         add_copy_conflict/1, add_copy_when_going_down/1, add_copy_when_dst_going_down/1,
          add_copy_with_down/1,
          replica_management/1, clear_table_during_load/1,
          schema_availability/1, local_content/1,
@@ -64,9 +64,11 @@ end_per_testcase(Func, Conf) ->
 all() -> 
     [system_info, table_info, error_description,
      db_node_lifecycle, evil_delete_db_node, start_and_stop,
-     checkpoint, table_lifecycle, storage_options, 
+     checkpoint, checkpoint_del_table,
+     table_lifecycle, storage_options,
      add_copy_conflict,
-     add_copy_when_going_down, add_copy_with_down, replica_management,
+     add_copy_when_going_down, add_copy_when_dst_going_down, add_copy_with_down,
+     replica_management,
      clear_table_during_load,
      schema_availability, local_content,
      {group, table_access_modifications}, replica_location,
@@ -163,11 +165,11 @@ table_info(Config) when is_list(Config) ->
     Schema = 
 	case mnesia_test_lib:diskless(Config) of
 	    true -> [{type, Type}, {attributes, Attrs}, {index, [ValPos]},
-		     {ram_copies, [Node1, Node2]}, {ext_ets, [Node3]}];
+		     {ram_copies, [Node1, Node2]}, {ext_ram_copies, [Node3]}];
 	    false ->		
 		[{type, Type}, {attributes, Attrs}, {index, [ValPos]},
 		 {disc_only_copies, [Node1]}, {ram_copies, [Node2]},
-		 {ext_ets, [Node3]}]
+		 {ext_ram_copies, [Node3]}]
 	end,
     ?match({atomic, ok}, mnesia:create_table(Tab, Schema)),
 
@@ -180,7 +182,7 @@ table_info(Config) when is_list(Config) ->
 	true -> 
 	    ?match(Nodes, mnesia:table_info(Tab, ram_copies));
 	false ->              
-	    ?match([Node3], mnesia:table_info(Tab, ext_ets)),
+	    ?match([Node3], mnesia:table_info(Tab, ext_ram_copies)),
 	    ?match([Node2], mnesia:table_info(Tab, ram_copies)),
 	    ?match([Node1], mnesia:table_info(Tab, mnesia_test_lib:storage_type(disc_only_copies, Config)))
     end,
@@ -256,7 +258,7 @@ db_node_lifecycle(Config) when is_list(Config) ->
 		  L1 = mnesia:table_info(T, ram_copies),
 		  L2 = mnesia:table_info(T, disc_copies),
 		  L3 = mnesia:table_info(T, disc_only_copies),
-		  L4 = mnesia:table_info(T, ext_ets),
+		  L4 = mnesia:table_info(T, ext_ram_copies),
 		  L1 ++ L2 ++ L3 ++ L4
 	  end,
 
@@ -316,7 +318,7 @@ db_node_lifecycle(Config) when is_list(Config) ->
 	    [{name, Tab3},  {ram_copies, [Node2, Node3]}],
 	    [{name, Tab4},  {disc_only_copies, [Node1]}],
 	    [{name, Tab5},  {disc_only_copies, [Node2]}],
-	    [{name, Tab6},  {ext_ets, [Node1, Node2]}]
+	    [{name, Tab6},  {ext_ram_copies, [Node1, Node2]}]
 	   ],
 
     [?match({atomic, ok}, mnesia:create_table(T)) || T <- Tabs ],
@@ -420,7 +422,7 @@ checkpoint(NodeConfig, Config) ->
                           CreateTab(Type, 3, [lists:last(TabNodes)])] ++
                              Acc
                  end,
-    Types = [ram_copies, disc_copies, disc_only_copies, ext_ets],
+    Types = [ram_copies, disc_copies, disc_only_copies, ext_ram_copies],
     Tabs = lists:foldl(CreateTabs, [], Types),
     Recs = ?sort([{T, N, N} || T <- Tabs, N <- lists:seq(1, 10)]),
     lists:foreach(fun(R) -> ?match(ok, mnesia:dirty_write(R)) end, Recs),
@@ -459,6 +461,22 @@ checkpoint(NodeConfig, Config) ->
     lists:foreach(Fun, Tabs),
     ?verify_mnesia(TabNodes, []).
 
+
+checkpoint_del_table(Config) when is_list(Config) ->
+    [Node1] = ?acquire_nodes(1, Config),
+    [mnesia:create_table(list_to_atom("a_" ++ integer_to_list(I)), []) || I <- lists:seq(1, 1000)],
+
+    Tabs = mnesia:system_info(local_tables),
+
+    spawn(fun() ->
+                  mnesia:activate_checkpoint([{max, Tabs},{ram_overrides_dump, true}])
+          end),
+
+    {atomic, ok} = mnesia:delete_table(a_10),
+    %% Ensure we didn't crash
+
+    ?verify_mnesia([Node1], []).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Create and delete tables
 
@@ -491,7 +509,7 @@ replica_location(Config) when is_list(Config) ->
 			     {ram_copies, [Node2]}, {disc_copies, [Node3]}]),
 
     Check(ext_location, [{disc_only_copies, [Node1]},
-			 {ext_ets, [Node2]}, {disc_copies, [Node3]}]),
+			 {ext_ram_copies, [Node2]}, {disc_copies, [Node3]}]),
 
     ?verify_mnesia(Nodes, []).
 
@@ -735,6 +753,54 @@ add_copy_when_going_down(Config) ->
     ?match_receive({test,{aborted,_}}),
     ?verify_mnesia([Node2], []).
 
+add_copy_when_dst_going_down(suite) -> [];
+add_copy_when_dst_going_down(doc) ->
+    ["Table copy destination node goes down. Verify that the issue fixed in erlang/otp#6013 doesn't happen again, whitebox testing."];
+add_copy_when_dst_going_down(Config) ->
+    [Node1, Node2] = ?acquire_nodes(2, Config),
+    ?match({atomic, ok}, mnesia:create_table(a, [{ram_copies, [Node1]}])),
+    lists:foreach(fun(I) ->
+                          ok = mnesia:sync_dirty(fun() -> mnesia:write({a, I, I}) end)
+                  end,
+                  lists:seq(1, 100000)),
+    ?match({ok, _}, mnesia:change_config(extra_db_nodes, [Node2])),
+
+    %% Start table copy
+    Tester = self(),
+    spawn_link(fun() ->
+                       mnesia:add_table_copy(a, Node2, ram_copies),
+                       Tester ! add_table_copy_finished
+               end),
+    timer:sleep(10),  % Wait for `mnesia_loader:send_more/6` has started
+
+    %% Grab a write lock
+    spawn_link(fun() ->
+                       Fun = fun() ->
+                                     ok = mnesia:write_lock_table(a),
+                                     Tester ! {write_lock_acquired, self()},
+                                     receive node2_mnesia_killed -> ok
+                                     end,
+                                     Tester ! write_lock_released,
+                                     ok
+                             end,
+                       mnesia:transaction(Fun)
+               end),
+    receive {write_lock_acquired, Locker} -> ok
+    end,
+    timer:sleep(200),  % Wait for `mnesia_loader:send_more/6` has finished
+    ?match([], mnesia_test_lib:kill_mnesia([Node2])),
+    Locker ! node2_mnesia_killed,
+
+    receive write_lock_released -> ok
+    end,
+    receive add_table_copy_finished -> ok
+    end,
+    timer:sleep(1000),  % Wait for `mnesia_loader:finish_copy/5` has acquired the read lock
+
+    %% Grab a write lock
+    ?match({atomic, ok}, mnesia:transaction(fun() -> mnesia:write_lock_table(a) end, 10)),
+    ?verify_mnesia([Node1], []).
+
 add_copy_with_down(suite) -> [];
 add_copy_with_down(Config) ->
     %% Allow add_table_copy() with ram_copies even all other replicas are down
@@ -806,7 +872,7 @@ replica_management(Config) when is_list(Config) ->
     %%
     ?match({atomic, ok},
            mnesia:create_table([{name, Tab}, {attributes, Attrs},
-                                {ram_copies, [Node1]}, {ext_ets, [Node3]}])),
+                                {ram_copies, [Node1]}, {ext_ram_copies, [Node3]}])),
     [?match(ok, mnesia:dirty_write({Tab, K, K + 2})) || K <-lists:seq(1, 10)],
     ?match([], ?vrl(Tab, [], [Node1, Node3], [], Nodes)),
     %% R - -
@@ -843,7 +909,7 @@ replica_management(Config) when is_list(Config) ->
     ?match([], ?vrl(Tab, [Node2], [], [Node1], Nodes)),
     ?match([0,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
     %% D DO -
-    ?match({atomic, ok}, mnesia:add_table_copy(Tab, Node3, ext_ets)),
+    ?match({atomic, ok}, mnesia:add_table_copy(Tab, Node3, ext_ram_copies)),
     ?match([], ?vrl(Tab, [Node2], [Node3], [Node1], Nodes)),
     ?match([10,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
     %% D DO R
@@ -870,7 +936,7 @@ replica_management(Config) when is_list(Config) ->
     ?match([10,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
 
     %% D DO D0
-    ?match({atomic, ok}, mnesia:change_table_copy_type(Tab, Node3, ext_ets)),
+    ?match({atomic, ok}, mnesia:change_table_copy_type(Tab, Node3, ext_ram_copies)),
     ?match([], ?vrl(Tab, [Node2], [Node3], [Node1], Nodes)),
     ?match([10,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
     %% D DO R
@@ -927,7 +993,7 @@ replica_management(Config) when is_list(Config) ->
     ?match([], ?vrl(Tab, [Node3], [], [Node2], Nodes)),
     ?match([0,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
     %% - D DO
-    ?match({atomic, ok}, mnesia:change_table_copy_type(Tab, Node3, ext_ets)),
+    ?match({atomic, ok}, mnesia:change_table_copy_type(Tab, Node3, ext_ram_copies)),
     ?match([], ?vrl(Tab, [], [Node3], [Node2], Nodes)),
     ?match([0,10,10], ?SS(rpc:multicall(Nodes, mnesia, table_info, [Tab, size]))),
     %% - D ER
@@ -2362,7 +2428,7 @@ record_name_dirty_access_disc_only(Config) when is_list(Config) ->
     record_name_dirty_access(disc_only_copies, Config).
 
 record_name_dirty_access_xets(Config) when is_list(Config) ->
-    record_name_dirty_access(ext_ets, Config).
+    record_name_dirty_access(ext_ram_copies, Config).
 
 
 record_name_dirty_access(Storage, Config) ->

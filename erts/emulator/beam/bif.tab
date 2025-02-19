@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 1996-2021. All Rights Reserved.
+# Copyright Ericsson AB 1996-2024. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,8 +56,7 @@ bif erlang:crc32_combine/3
 bif erlang:date/0
 bif erlang:delete_module/1
 bif erlang:display/1
-bif erlang:display_string/1
-bif erlang:display_nl/0
+bif erlang:display_string/2
 ubif erlang:element/2
 bif erlang:erase/0
 hbif erlang:erase/1
@@ -83,13 +82,11 @@ bif erlang:phash2/1
 bif erlang:phash2/2
 ubif erlang:hd/1
 bif erlang:integer_to_list/1
-bif erlang:is_alive/0
 ubif erlang:length/1
 bif erlang:link/1
-bif erlang:list_to_atom/1
+ubif erlang:list_to_atom/1
 bif erlang:list_to_binary/1
 bif erlang:list_to_float/1
-bif erlang:list_to_integer/1
 bif erlang:list_to_pid/1
 bif erlang:list_to_port/1
 bif erlang:list_to_ref/1
@@ -110,7 +107,9 @@ bif erlang:monitor_node/2
 bif erlang:monitor_node/3
 ubif erlang:node/1
 ubif erlang:node/0
+bif erlang:nodes/0
 bif erlang:nodes/1
+bif erlang:nodes/2
 bif erlang:now/0
 bif erlang:monotonic_time/0
 bif erlang:monotonic_time/1
@@ -263,10 +262,6 @@ bif erlang:make_tuple/3
 
 bif erlang:system_flag/2
 bif erlang:system_info/1
-# New in R9C
-bif erlang:system_monitor/0
-bif erlang:system_monitor/1
-bif erlang:system_monitor/2
 # Added 2006-11-07
 bif erlang:system_profile/2
 # End Added 2006-11-07
@@ -358,12 +353,15 @@ bif ets:delete/1
 bif ets:delete/2
 bif ets:delete_object/2
 bif ets:first/1
+bif ets:first_lookup/1
 bif ets:is_compiled_ms/1
 bif ets:lookup/2
 bif ets:lookup_element/3
+bif ets:lookup_element/4
 bif ets:info/1
 bif ets:info/2
 bif ets:last/1
+bif ets:last_lookup/1
 bif ets:match/1
 bif ets:match/2
 bif ets:match/3
@@ -372,7 +370,9 @@ bif ets:match_object/2
 bif ets:match_object/3
 bif ets:member/2
 bif ets:next/2
+bif ets:next_lookup/2
 bif ets:prev/2
+bif ets:prev_lookup/2
 bif ets:insert/2
 bif ets:insert_new/2
 bif ets:rename/2
@@ -445,7 +445,6 @@ bif erts_debug:same/2
 bif erts_debug:flat_size/1
 bif erts_debug:get_internal_state/1
 bif erts_debug:set_internal_state/2
-bif erts_debug:display/1
 bif erts_debug:dist_ext_to_term/2
 bif erts_debug:instructions/0
 bif erts_debug:interpreter_size/0
@@ -475,12 +474,11 @@ bif error_logger:warning_map/0
 bif erlang:get_module_info/1
 bif erlang:get_module_info/2
 ubif erlang:is_boolean/1
-bif string:list_to_integer/1
 bif string:list_to_float/1
 bif erlang:make_fun/3
 bif erlang:iolist_size/1
 bif erlang:iolist_to_binary/1
-bif erlang:list_to_existing_atom/1
+ubif erlang:list_to_existing_atom/1
 
 #
 # New Bifs in R12B-0
@@ -512,8 +510,8 @@ bif unicode:bin_is_7bit/1
 # New Bifs in R13A.
 #
 bif erlang:atom_to_binary/2
-bif erlang:binary_to_atom/2
-bif erlang:binary_to_existing_atom/2
+ubif erlang:binary_to_atom/2
+ubif erlang:binary_to_existing_atom/2
 bif net_kernel:dflag_unicode_io/1
 #
 # New Bifs in R13B-1
@@ -611,10 +609,7 @@ bif erlang:dt_append_vm_tag_data/1
 bif erlang:finish_loading/1
 bif erlang:insert_element/3
 bif erlang:delete_element/2
-bif erlang:binary_to_integer/1
-bif erlang:binary_to_integer/2
 bif erlang:integer_to_binary/1
-bif erlang:list_to_integer/2
 bif erlang:float_to_binary/1
 bif erlang:float_to_binary/2
 bif erlang:binary_to_float/1
@@ -777,3 +772,41 @@ bif erlang:unalias/1
 bif erlang:monitor/3
 bif erlang:error/3
 bif maps:from_keys/2
+
+# New in 24 (in a patch)
+bif erts_internal:binary_to_integer/2
+bif erts_internal:list_to_integer/2
+
+#
+# New in 26
+#
+ubif erlang:min/2
+ubif erlang:max/2
+bif erts_internal:term_to_string/2
+
+#
+# New in 27.
+#
+bif code:coverage_support/0
+bif code:get_coverage_mode/0
+bif code:get_coverage_mode/1
+bif code:get_coverage/2
+bif code:reset_coverage/1
+bif code:set_coverage_mode/1
+bif ets:update_element/4
+bif erts_internal:trace_session_create/3
+bif erts_internal:trace_session_destroy/1
+bif erts_internal:trace/4
+bif erts_internal:trace_pattern/4
+bif erts_internal:trace_info/3
+bif erts_trace_cleaner:check/0
+bif erts_trace_cleaner:send_trace_clean_signal/1
+
+#
+# New in 28.
+#
+bif erts_internal:system_monitor/1
+bif erts_internal:system_monitor/3
+bif erts_internal:processes_next/1
+bif code:get_debug_info/1
+

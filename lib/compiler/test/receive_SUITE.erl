@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,7 +29,8 @@
          match_built_terms/1,elusive_common_exit/1,
          return_before_receive/1,trapping/1,
          after_expression/1,in_after/1,
-         type_optimized_markers/1]).
+         type_optimized_markers/1,
+         bs_get_tail/1]).
 
 -include_lib("common_test/include/ct.hrl").
 
@@ -53,7 +54,8 @@ groups() ->
        match_built_terms,elusive_common_exit,
        return_before_receive,trapping,
        after_expression,in_after,
-       type_optimized_markers]},
+       type_optimized_markers,
+       bs_get_tail]},
      {slow,[],[ref_opt]}].
 
 init_per_suite(Config) ->
@@ -190,11 +192,15 @@ coverage(Config) when is_list(Config) ->
     self() ! whatever,
     {'EXIT',{{badmatch,_},_}} = (catch [a || other = receive whatever -> false end]),
 
+    %% Cover code in beam_ssa_pre_codegen.
+    self() ! 0,
+    42 = receive_in_try_and_after(),
+
     ok.
 
 receive_in_called_function() ->
     RefA = make_ref(),
-    RefB = make_ref(),
+    RefB = returns_reference(),
 
     self() ! hello,
     self() ! RefA,
@@ -215,6 +221,9 @@ receive_in_called_function() ->
     ricf_1(Foo, Bar),
 
     ok.
+
+returns_reference() ->
+    make_ref().
 
 ricf_1(A, B) ->
     %% Both A and B are fed a reference at least once, so both of these loops
@@ -354,6 +363,22 @@ commit_participant(Coord, Tid) ->
             ok
     end,
     ok.
+
+receive_in_try_and_after() ->
+    try
+        id(42)
+    catch
+        _:V0 when true#{}; whatever ->
+            receive
+                _ when 1; V0 ->
+                    1
+            end
+    after
+        receive
+            0 ->
+                car
+        end
+    end.
 
 %% OTP-7980. Thanks to Vincent de Phily. The following code would
 %% be inccorrectly optimized by beam_jump.
@@ -859,6 +884,9 @@ type_optimized_markers(_Config) ->
     self() ! Ref,
     gaffel = tom_2(Ref),
 
+    self() ! {inet_reply, self(), all_well},
+    all_well = tom_3(self(), undefined, 1),
+
     ok.
 
 tom_1(Ref) ->
@@ -895,6 +923,36 @@ tom_2(Ref) ->
             end;
         Ref ->
             gaffel
+    end.
+
+tom_3(S, Mref, ReplyTimeout) ->
+    receive
+        {inet_reply, S, Status} ->
+            case Mref of
+                undefined ->
+                    ok;
+                _ ->
+                    demonitor(Mref, [flush])
+            end,
+            Status
+    after
+        ReplyTimeout ->
+            tom_3(S, monitor(process, S), ReplyTimeout)
+    end.
+
+bs_get_tail(_Config) ->
+    Ref = make_ref(),
+    self() ! {<<1,"abc">>, Ref},
+    {<<"abc">>,Ref} = do_bs_get_tail(),
+
+    ok.
+
+do_bs_get_tail() ->
+    receive
+        {<<1, FieldsBin/bits>>, StreamRef} ->
+            A = id(FieldsBin),
+            B = id(StreamRef),
+            {A,B}
     end.
 
 %%%
