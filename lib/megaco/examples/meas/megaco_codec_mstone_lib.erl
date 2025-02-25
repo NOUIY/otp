@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2006-2020. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 %%----------------------------------------------------------------------
 
 -module(megaco_codec_mstone_lib).
-
+-moduledoc false.
 
 %% API
 %% Avoid warning for local function error/1 clashing with autoimported BIF.
@@ -83,12 +83,8 @@ display_os_info() ->
 	    Str ->
 		Str
 	end,
-    case os:type() of
-	{OsFam, OsName} ->
-	    io:format("OS:                  ~p-~p: ~s~n", [OsFam, OsName, V]);
-	OsFam ->
-	    io:format("OS:                  ~p: ~s~n", [OsFam, V])
-    end.
+    {OsFam, OsName} = os:type(),
+    io:format("OS:                  ~p-~p: ~s~n", [OsFam, OsName, V]).
 	    
 
 %%----------------------------------------------------------------------
@@ -191,12 +187,8 @@ display_alloc_info([{Alloc, Mem}|AllocInfo]) ->
     display_alloc_info(AllocInfo).
 
 alloc_info() ->
-    case erlang:system_info(allocator) of
-        {_Allocator, _Version, Features, _Settings} ->
-            alloc_info(Features);
-        _ ->
-            []
-    end.
+    {_Allocator, _Version, Features, _Settings} = erlang:system_info(allocator),
+    alloc_info(Features).
 
 alloc_info(Allocators) ->
     Allocs = [temp_alloc, sl_alloc, std_alloc, ll_alloc, eheap_alloc,
@@ -266,7 +258,14 @@ display_app_info() ->
 display_megaco_info() ->
     MI = megaco:module_info(),
     {value, {attributes, Attr}} = lists:keysearch(attributes, 1, MI),
-    {value, {app_vsn,    Ver}}  = lists:keysearch(app_vsn, 1, Attr),
+    {value, {app_vsn,    MVer}} = lists:keysearch(app_vsn, 1, Attr),
+    Ver =
+        case MVer of
+            "megaco-" ++ VStr ->
+                VStr;
+            _ ->
+                MVer
+        end,
     io:format("Megaco version:      ~s~n", [Ver]).
 
 display_asn1_info() ->

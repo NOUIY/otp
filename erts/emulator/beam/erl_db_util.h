@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1998-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 #ifndef _DB_UTIL_H
 #define _DB_UTIL_H
 
+#include <stdbool.h>
 #include "erl_flxctr.h"
 #include "global.h"
 #include "erl_message.h"
@@ -101,6 +102,12 @@ typedef struct {
             int current_level;
         } catree;
     } u;
+    Eterm* old_tpl;
+#ifdef DEBUG
+    Eterm old_tpl_dflt[2];
+#else
+    Eterm old_tpl_dflt[8];
+#endif
 } DbUpdateHandle;
 
 /* How safe are we from double-hits or missed objects
@@ -131,7 +138,7 @@ typedef struct db_table_method
 		   Eterm* ret);
     int (*db_put)(DbTable* tb, /* [in out] */ 
 		  Eterm obj,
-		  int key_clash_fail, /* DB_ERROR_BADKEY if key exists */
+                  bool key_clash_fail, /* DB_ERROR_BADKEY if key exists */
                   SWord *consumed_reds_p);
     int (*db_get)(Process* p, 
 		  DbTable* tb, /* [in out] */ 
@@ -221,7 +228,7 @@ typedef struct db_table_method
     
     void (*db_print)(fmtfn_t to,
 		     void* to_arg, 
-		     int show, 
+                     bool show,
 		     DbTable* tb /* [in out] */ );
 
     void (*db_foreach_offheap)(DbTable* db,  /* [in out] */ 
@@ -229,27 +236,42 @@ typedef struct db_table_method
 			       void *arg);
 
     /* Lookup a dbterm for updating. Return false if not found. */
-    int (*db_lookup_dbterm)(Process *, DbTable *, Eterm key, Eterm obj,
+    bool (*db_lookup_dbterm)(Process *, DbTable *, Eterm key, Eterm obj,
                             DbUpdateHandle* handle);
 
     /* Must be called for each db_lookup_dbterm that returned true, even if
     ** dbterm was not updated. If the handle was of a new object and cret is
     ** not DB_ERROR_NONE, the object is removed from the table. */
     void (*db_finalize_dbterm)(int cret, DbUpdateHandle* handle);
-    void* (*db_eterm_to_dbterm)(int compress, int keypos, Eterm obj);
-    void* (*db_dbterm_list_prepend)(void* list, void* db_term);
+    void* (*db_eterm_to_dbterm)(bool compress, int keypos, Eterm obj);
+    void* (*db_dbterm_list_append)(void* last_term, void* db_term);
     void* (*db_dbterm_list_remove_first)(void** list);
     int (*db_put_dbterm)(DbTable* tb, /* [in out] */
                          void* obj,
-                         int key_clash_fail, /* DB_ERROR_BADKEY if key exists */
+                         bool key_clash_fail, /* DB_ERROR_BADKEY if key exists */
                          SWord *consumed_reds_p);
-    void (*db_free_dbterm)(int compressed, void* obj);
+    void (*db_free_dbterm)(bool compressed, void* obj);
     Eterm (*db_get_dbterm_key)(DbTable* tb, void* db_term);
     int (*db_get_binary_info)(Process*, DbTable* tb, Eterm key, Eterm* ret);
     /* Raw first/next same as first/next but also return pseudo deleted keys.
        Only internal use by ets:info(_,binary) */
     int (*db_raw_first)(Process*, DbTable*, Eterm* ret);
     int (*db_raw_next)(Process*, DbTable*, Eterm key, Eterm* ret);
+    /* Same as first/last/next/prev, but returns object(s) along with key */
+    int (*db_first_lookup)(Process* p,
+		    DbTable* tb, /* [in out] */
+		    Eterm* ret   /* [out] */);
+    int (*db_next_lookup)(Process* p,
+		   DbTable* tb, /* [in out] */
+		   Eterm key,   /* [in] */
+		   Eterm* ret /* [out] */);
+    int (*db_last_lookup)(Process* p,
+		   DbTable* tb, /* [in out] */
+		   Eterm* ret   /* [out] */);
+    int (*db_prev_lookup)(Process* p,
+		   DbTable* tb, /* [in out] */
+		   Eterm key,
+		   Eterm* ret);
 } DbTableMethod;
 
 typedef struct db_fixation {
@@ -262,7 +284,7 @@ typedef struct db_fixation {
     /* Node in fixing_procs tree */
     struct {
         struct db_fixation *left, *right, *parent;
-        int is_red;
+        bool is_red;
         Process* p;
     } procs;
 
@@ -295,14 +317,14 @@ typedef struct db_table_common {
     DbTableList owned;
     erts_rwmtx_t rwlock;  /* rw lock on table */
     erts_mtx_t fixlock;   /* Protects fixing_procs and time */
-    int is_thread_safe;       /* No fine locking inside table needed */
+    bool is_thread_safe;       /* No fine locking inside table needed */
     Uint32 type;              /* table type, *read only* after creation */
     Eterm owner;              /* Pid of the creator */
     Eterm heir;               /* Pid of the heir */
     UWord heir_data;          /* To send in ETS-TRANSFER (is_immed or (DbTerm*) */
     Uint64 heir_started_interval;  /* To further identify the heir */
     Eterm the_name;           /* an atom */
-    Binary *btid;
+    Binary *btid;             /* table magic ref, read only after creation */
     DbTableMethod* meth;      /* table methods */
     /* The ErtsFlxCtr below contains:
      * - Total number of items in table
@@ -318,14 +340,10 @@ typedef struct db_table_common {
     /* All 32-bit fields */
     Uint32 status;            /* bit masks defined  below */
     int keypos;               /* defaults to 1 */
-    int compress;
+    bool compress;
 
     /* For unfinished operations that needs to be helped */
-    void (*continuation)(long *reds_ptr,
-                         void** state,
-                         void* extra_context); /* To help yielded process */
-    erts_atomic_t continuation_state;
-    Binary* continuation_res_bin;
+    struct ets_insert_2_list_info* continuation_ctx;
 #ifdef ETS_DBG_FORCE_TRAP
     int dbg_force_trap;  /* force trap on table lookup */
 #endif
@@ -376,21 +394,21 @@ typedef struct db_table_common {
 ERTS_GLB_INLINE Eterm db_copy_key(Process* p, DbTable* tb, DbTerm* obj);
 Eterm db_copy_from_comp(DbTableCommon* tb, DbTerm* bp, Eterm** hpp,
 			ErlOffHeap* off_heap);
-int db_eq_comp(DbTableCommon* tb, Eterm a, DbTerm* b);
+bool db_eq_comp(DbTableCommon* tb, Eterm a, DbTerm* b);
 DbTerm* db_alloc_tmp_uncompressed(DbTableCommon* tb, DbTerm* org);
 void db_free_tmp_uncompressed(DbTerm* obj);
 
 ERTS_GLB_INLINE Eterm db_copy_object_from_ets(DbTableCommon* tb, DbTerm* bp,
 					      Eterm** hpp, ErlOffHeap* off_heap);
-ERTS_GLB_INLINE int db_eq(DbTableCommon* tb, Eterm a, DbTerm* b);
-Wterm db_do_read_element(DbUpdateHandle* handle, Sint position);
+ERTS_GLB_INLINE bool db_eq(DbTableCommon* tb, Eterm a, DbTerm* b);
+Eterm db_do_read_element(DbUpdateHandle* handle, Sint position);
 
 #if ERTS_GLB_INLINE_INCL_FUNC_DEF
 
 ERTS_GLB_INLINE Eterm db_copy_key(Process* p, DbTable* tb, DbTerm* obj)
 {
     Eterm key = GETKEY(tb, obj->tpl);
-    if IS_CONST(key) return key;
+    if is_immed(key) return key;
     else {
 	Uint size = size_object(key);
 	Eterm* hp = HAlloc(p, size);
@@ -404,14 +422,14 @@ ERTS_GLB_INLINE Eterm db_copy_object_from_ets(DbTableCommon* tb, DbTerm* bp,
 					      Eterm** hpp, ErlOffHeap* off_heap)
 {
     if (tb->compress) {
-	return db_copy_from_comp(tb, bp, hpp, off_heap);
+        return db_copy_from_comp(tb, bp, hpp, off_heap);
     }
     else {
-	return copy_shallow(bp->tpl, bp->size, hpp, off_heap);
+        return make_tuple(copy_shallow(bp->tpl, bp->size, hpp, off_heap));
     }
 }
 
-ERTS_GLB_INLINE int db_eq(DbTableCommon* tb, Eterm a, DbTerm* b)
+ERTS_GLB_INLINE bool db_eq(DbTableCommon* tb, Eterm a, DbTerm* b)
 {
     if (!tb->compress) {
 	return EQ(a, make_tuple(b->tpl));
@@ -445,7 +463,7 @@ void db_initialize_util(void);
 Eterm db_getkey(int keypos, Eterm obj);
 void db_cleanup_offheap_comp(DbTerm* p);
 void db_free_term(DbTable *tb, void* basep, Uint offset);
-void db_free_term_no_tab(int compress, void* basep, Uint offset);
+void db_free_term_no_tab(bool compress, void* basep, Uint offset);
 Uint db_term_size(DbTable *tb, void* basep, Uint offset);
 void* db_store_term(DbTableCommon *tb, DbTerm* old, Uint offset, Eterm obj);
 void* db_store_term_comp(DbTableCommon *tb, /*May be NULL*/
@@ -455,16 +473,16 @@ void* db_store_term_comp(DbTableCommon *tb, /*May be NULL*/
 Eterm db_copy_element_from_ets(DbTableCommon* tb, Process* p, DbTerm* obj,
 			       Uint pos, Eterm** hpp, Uint extra);
 int db_has_map(Eterm obj);
-int db_has_variable(Eterm obj);
+bool db_is_fully_bound(Eterm obj);
 int db_is_variable(Eterm obj);
 void db_do_update_element(DbUpdateHandle* handle,
 			  Sint position,
 			  Eterm newval);
 void db_finalize_resize(DbUpdateHandle* handle, Uint offset);
-Eterm db_add_counter(Eterm** hpp, Wterm counter, Eterm incr);
+Eterm db_add_counter(Eterm** hpp, Eterm counter, Eterm incr);
 Binary *db_match_set_compile(Process *p, Eterm matchexpr, 
 			     Uint flags, Uint *freasonp);
-int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body);
+bool db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body);
 int erts_db_match_prog_destructor(Binary *);
 
 typedef struct match_prog {
@@ -478,6 +496,7 @@ typedef struct match_prog {
     Eterm saved_program;
     Uint heap_size;          /* size of: heap + eheap + stack */
     Uint stack_offset;
+    struct ErtsTraceSession* trace_session;
 #ifdef DMC_DEBUG
     UWord* prog_end;		/* End of program */
 #endif
@@ -575,14 +594,15 @@ ERTS_GLB_INLINE Binary *erts_db_get_match_prog_binary_unchecked(Eterm term);
 
 /** @brief Ensure off-heap header is word aligned, make a temporary copy if
  * not. Needed when inspecting ETS off-heap lists that may contain unaligned
- * ProcBins if table is 'compressed'.
+ * BinRef and ErtsMRefThing if table is 'compressed'.
  */
-struct erts_tmp_aligned_offheap
+union erts_tmp_aligned_offheap
 {
-    ProcBin proc_bin;
+    BinRef proc_bin;
+    ErtsMRefThing mref_thing;
 };
 ERTS_GLB_INLINE void erts_align_offheap(union erl_off_heap_ptr*,
-                                        struct erts_tmp_aligned_offheap* tmp);
+                                        union erts_tmp_aligned_offheap* tmp);
 
 #if ERTS_GLB_INLINE_INCL_FUNC_DEF
 
@@ -618,20 +638,27 @@ erts_db_get_match_prog_binary(Eterm term)
 
 ERTS_GLB_INLINE void
 erts_align_offheap(union erl_off_heap_ptr* ohp,
-                   struct erts_tmp_aligned_offheap* tmp)
+                   union erts_tmp_aligned_offheap* tmp)
 {
     if ((UWord)ohp->voidp % sizeof(UWord) != 0) {
         /*
-         * ETS store word unaligned ProcBins in its compressed format.
-         * Make a temporary aligned copy.
+         * ETS store word unaligned BinRef and ErtsMRefThing in its compressed
+         * format. Make a temporary aligned copy.
          *
          * Warning, must pass (void*)-variable to memcpy. Otherwise it will
          * cause Bus error on Sparc due to false compile time assumptions
          * about word aligned memory (type cast is not enough).
          */
-        sys_memcpy(tmp, ohp->voidp, sizeof(*tmp));
-        ASSERT(tmp->proc_bin.thing_word == HEADER_PROC_BIN);
-        ohp->pb = &tmp->proc_bin;
+        sys_memcpy(tmp, ohp->voidp, sizeof(Eterm)); /* thing_word */
+        if (tmp->proc_bin.thing_word == HEADER_BIN_REF) {
+            sys_memcpy(tmp, ohp->voidp, sizeof(tmp->proc_bin));
+            ohp->br = &tmp->proc_bin;
+        }
+        else {
+            sys_memcpy(tmp, ohp->voidp, sizeof(tmp->mref_thing));
+            ASSERT(is_magic_ref_thing(&tmp->mref_thing));
+            ohp->mref = &tmp->mref_thing;
+        }
     }
 }
 

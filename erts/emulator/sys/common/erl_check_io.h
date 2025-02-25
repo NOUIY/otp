@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2006-2020. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2025. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,23 @@ Eterm erts_check_io_info(void *proc);
 void erts_io_notify_port_task_executed(ErtsPortTaskType type,
                                        ErtsPortTaskHandle *handle,
                                        void (*reset)(ErtsPortTaskHandle *));
+
+#if ERTS_POLL_USE_SCHEDULER_POLLING
+/**
+ * Handles an nif select non-message signal. Returns the message Eterm.
+ * 
+ * @param sig The signal that has arrived
+ */
+Eterm erts_io_handle_nif_select(ErtsMessage *sig);
+
+/**
+ * Clears all nif select handles from scheduler queue.
+ * 
+ * @param sig The signal that has arrived
+ */
+void erts_io_clear_nif_select_handles(ErtsSchedulerData *esdp);
+#endif
+
 /**
  * Returns the maximum number of fds that the check io framework can handle.
  */
@@ -112,6 +129,22 @@ typedef struct {
 } ErtsIoTask;
 
 
+ERTS_GLB_INLINE int erts_sched_poll_enabled(void);
+
+#if ERTS_GLB_INLINE_INCL_FUNC_DEF
+
+ERTS_GLB_INLINE int erts_sched_poll_enabled(void)
+{
+#if ERTS_POLL_USE_SCHEDULER_POLLING
+    extern ErtsPollSet *sched_pollset;
+    return (sched_pollset != NULL);
+#else
+    return 0;
+#endif
+}
+
+#endif /* ERTS_GLB_INLINE_INCL_FUNC_DEF */
+
 #endif /*  ERL_CHECK_IO_H__ */
 
 #if !defined(ERL_CHECK_IO_C__) && !defined(ERTS_ALLOC_C__)
@@ -133,6 +166,7 @@ extern int erts_no_poll_threads;
 #include "erl_poll.h"
 #include "erl_port_task.h"
 
+
 typedef struct {
     Eterm inport;
     Eterm outport;
@@ -152,3 +186,4 @@ typedef struct {
 } ErtsNifSelectDataState;
 
 #endif /* #ifndef ERL_CHECK_IO_INTERNAL__ */
+

@@ -2,7 +2,7 @@ dnl Process this file with autoconf to produce a configure script. -*-m4-*-
 
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 2008-2021. All Rights Reserved.
+dnl Copyright Ericsson AB 2008-2024. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ m4_include([otp.m4])
 AC_CONFIG_AUX_DIR([${ERL_TOP}/make/autoconf])
 
 AC_PREREQ([2.71])
+
+ERL_PUSH_WERROR
 
 ## Delete previous failed configure results
 if test -f ./CONF_INFO; then
@@ -60,6 +62,11 @@ esac
 
 TARGET=$host
 AC_SUBST(TARGET)
+
+# The resulting binary should be a library, not an executable. Therefore, the
+# various PIE flags are not needed.
+CFLAGS="$(echo $CFLAGS | sed -e 's!-fPIE!!g' -e 's!-fpie!!g')"
+LDFLAGS="$(echo $LDFLAGS | sed -e 's!-fPIE!!' -e 's!-fpie!!' -e 's!-pie!!')"
 
 AC_PROG_CC
 AC_PROG_CXX
@@ -185,20 +192,29 @@ AS_CASE([$host_os],
     ],
 
     [
-	CFLAGS="$CFLAGS -Wno-deprecated-declarations"
-	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE $PTHR_CFLAGS"
+        GLIB_CFLAGS=`pkg-config --silence-errors --cflags glib-2.0`
+        GLIB_LIBS=`pkg-config --silence-errors --libs glib-2.0`
+        if test X"$GLIB_CFLAGS" != X ; then
+            HAVE_GLIB="-DHAVE_GLIB=1"
+        fi
+        CFLAGS="$CFLAGS -Wno-deprecated-declarations"
+       	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE $PTHR_CFLAGS $HAVE_GLIB"
     ])
+
+AC_SUBST(GLIB_CFLAGS)
+AC_SUBST(GLIB_LIBS)
 
 AC_SUBST(OBJC_CC)
 AC_SUBST(OBJC_CFLAGS)
 
+EXTRA_LDFLAGS=
+
 case $host_os in
     darwin*)
-	LDFLAGS="$MAC_MIN -bundle -flat_namespace -undefined warning -fPIC $LDFLAGS"
-	# Check sizof_void_p as future will hold 64bit MacOS wx
-	if test $ac_cv_sizeof_void_p = 4; then
-	    LDFLAGS="-m32 $LDFLAGS"
-	fi		   
+        # beam.smp has not been built yet, so we must not use the
+        # -bundle_loader option in the configuration tests.
+	LDFLAGS="$MAC_MIN -bundle $LDFLAGS"
+	EXTRA_LDFLAGS=" -bundle_loader ${ERL_TOP}/bin/$host/beam.smp"
 	GL_LIBS="-framework OpenGL"
 	;;
     win32)
@@ -210,7 +226,10 @@ case $host_os in
 	GL_LIBS="-lglu32 -lOpengl32"
 	;;
     *)
-	LDFLAGS="-shared -fPIC $LDFLAGS"
+        # When checking linkage we'd like to see that symbols are resolved.
+        # In order to notice errors, we must test without `-shared`.
+	LDFLAGS="-fPIC $LDFLAGS"
+	EXTRA_LDFLAGS=" -shared "
 	GL_LIBS="-lGL -lGLU"
 	;;
 esac
@@ -471,22 +490,30 @@ AS_IF(
     CWX_DOCUMENTED="$DOC_OPT2/wxWidgets-3.*.* $DOC_OPT2/wxMSW-3.*.* $CWX_DOCUMENTED"
 
     case $ac_cv_sizeof_void_p in
-    	 8)
-                VC_LIB=lib/vc_x64_lib
-                WX_ARCH=x64
-		DOC_OPT64_1=/opt/local64/pgm
-		DOC_OPT64_2=/mnt/c/opt/local64/pgm
-		CWX_DOCUMENTED="$DOC_OPT64_1/wxWidgets-3.*.* $DOC_OPT64_1/wxMSW-3.*.* $CWX_DOCUMENTED"
-		CWX_DOCUMENTED="$DOC_OPT64_2/wxWidgets-3.*.* $DOC_OPT64_2/wxMSW-3.*.* $CWX_DOCUMENTED"
-		;;
-         *)
-                VC_LIB=lib/vc_lib
-                WX_ARCH=x86
-		DOC_OPT3=/opt/local32/pgm
-		DOC_OPT4=/mnt/c/opt/local32/pgm
-		CWX_DOCUMENTED="$DOC_OPT3/wxWidgets-3.*.* $DOC_OPT3/wxMSW-3.*.* $CWX_DOCUMENTED"
-		CWX_DOCUMENTED="$DOC_OPT4/wxWidgets-3.*.* $DOC_OPT4/wxMSW-3.*.* $CWX_DOCUMENTED"
-		;;
+      8)
+        case $host_cpu in
+          aarch64)
+            VC_LIB=lib/vc_arm64_lib
+            WX_ARCH=aarch64
+            ;;
+          *)
+            VC_LIB=lib/vc_x64_lib
+            WX_ARCH=x64
+            ;;
+        esac
+        DOC_OPT64_1=/opt/local64/pgm
+        DOC_OPT64_2=/mnt/c/opt/local64/pgm
+        CWX_DOCUMENTED="$DOC_OPT64_1/wxWidgets-3.*.* $DOC_OPT64_1/wxMSW-3.*.* $CWX_DOCUMENTED"
+        CWX_DOCUMENTED="$DOC_OPT64_2/wxWidgets-3.*.* $DOC_OPT64_2/wxMSW-3.*.* $CWX_DOCUMENTED"
+        ;;
+      *)
+        VC_LIB=lib/vc_lib
+        WX_ARCH=x86
+        DOC_OPT3=/opt/local32/pgm
+        DOC_OPT4=/mnt/c/opt/local32/pgm
+        CWX_DOCUMENTED="$DOC_OPT3/wxWidgets-3.*.* $DOC_OPT3/wxMSW-3.*.* $CWX_DOCUMENTED"
+        CWX_DOCUMENTED="$DOC_OPT4/wxWidgets-3.*.* $DOC_OPT4/wxMSW-3.*.* $CWX_DOCUMENTED"
+        ;;
     esac
 
     CWXPATH="$CWXWIN0 $CWXWIN1 $CWXWIN2 $CWX_DOCUMENTED $CWXWIN3 $CWXWIN4"
@@ -559,9 +586,6 @@ CXXFLAGS="$CXXFLAGS $WX_CXXFLAGS"
 
 AC_COMPILE_IFELSE(
  [AC_LANG_PROGRAM([[
-  #ifdef WIN32
-  # include <windows.h>
-  #endif
   #include "wx/wx.h"
   ]], [[
   #if wxMAJOR_VERSION > 2 && (wxMINOR_VERSION == 0 || WXWIN_COMPATIBILITY_3_0 == 1)
@@ -587,9 +611,6 @@ CXXFLAGS="$CXXFLAGS $WX_CXXFLAGS"
 
 AC_COMPILE_IFELSE(
  [AC_LANG_PROGRAM([[
-  #ifdef WIN32
-  # include <windows.h>
-  #endif
   #include "wx/wx.h"
   ]], [[
   #if wxUSE_GLCANVAS
@@ -655,34 +676,20 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 AC_MSG_RESULT($TESS_CB_TIGER_STYLE)
 AC_SUBST(TESS_CB_TIGER_STYLE)
 
-dnl 
-dnl Check that we wx have stc (wxStyledTextControl) headers 
-dnl 
-
-AC_CHECK_HEADERS([wx/stc/stc.h],
-        [],
-    	[WX_MSG_ERROR([Can not find wx/stc/stc.h $CXXFLAGS])      
-     	],
-	[#ifdef WIN32
-	 # include <windows.h>
-         #endif
-         #include "wx/wx.h"])
-
-dnl 
+dnl
 dnl Check that we can link all the libraries
-dnl 
+dnl
 
 AC_MSG_CHECKING(if we can link wxwidgets programs)
 saved_LIBS=$LIBS
 
 if test X"$WX_HAVE_STATIC_LIBS" = X"true" ; then
    LIBS=$WX_LIBS_STATIC   
+else
+   LIBS=$WX_LIBS
 fi
 
 AC_LINK_IFELSE([AC_LANG_SOURCE([[
-		#ifdef WIN32
-		# include <windows.h>
-		#endif
                 #include "wx/wx.h"
 		#include "wx/stc/stc.h"
 
@@ -717,6 +724,8 @@ fi
 
 ]) dnl - if test "$WXERL_CAN_BUILD_DRIVER" != "false"
 
+LDFLAGS="$LDFLAGS$EXTRA_LDFLAGS"
+
 AC_SUBST(WXERL_CAN_BUILD_DRIVER)
 
 AS_IF([test "x$GCC" = xyes],
@@ -725,27 +734,6 @@ AS_IF([test "x$GCC" = xyes],
     LM_TRY_ENABLE_CFLAG([-Werror=return-type], [CFLAGS])
     LM_TRY_ENABLE_CFLAG([-Werror=return-type], [CXXFLAGS])
   ])
-
-dnl ----------------------------------------------------------------------
-dnl Enable -fsanitize= flags.
-dnl ----------------------------------------------------------------------
-
-m4_define(DEFAULT_SANITIZERS, [address,undefined])
-AC_ARG_ENABLE(
-    sanitizers,
-    AS_HELP_STRING(
-        [--enable-sanitizers@<:@=comma-separated list of sanitizers@:>@],
-	    [Default=DEFAULT_SANITIZERS]),
-[
-case "$enableval" in
-    no) sanitizers= ;;
-    yes) sanitizers="-fsanitize=DEFAULT_SANITIZERS" ;;
-    *) sanitizers="-fsanitize=$enableval" ;;
-esac
-CFLAGS="$CFLAGS $sanitizers"
-CXXFLAGS="$CXXFLAGS $sanitizers"
-LDFLAGS="$LDFLAGS $sanitizers"
-])
 
 #############################################################################
 
@@ -771,6 +759,8 @@ AC_SUBST(WXERL_SYS_TYPE)
 mkdir -p $WXERL_SYS_TYPE
 CONFIG_STATUS=$WXERL_SYS_TYPE/config.status
 
+ERL_POP_WERROR
+
 dnl
 
 AC_CONFIG_FILES([ 
@@ -784,6 +774,3 @@ CORES=`ls core* 2>/dev/null`
 if test X"$CORES" != X"" ; then
    echo "Configure dumped core files" > ignore_core_files
 fi
-
-
-

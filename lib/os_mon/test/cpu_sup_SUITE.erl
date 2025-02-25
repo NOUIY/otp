@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2002-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -56,15 +56,18 @@ suite() ->
      {timetrap,{minutes,1}}].
 
 all() -> 
-    case test_server:os_type() of
+    case os:type() of
         {unix, sunos} ->
             [load_api, util_api, util_values, port, unavailable];
         {unix, linux} ->
             [load_api, util_api, util_values, port, unavailable];
         {unix, freebsd} ->
             [load_api, util_api, util_values, port, unavailable];
+        {unix, openbsd} ->
+            [load_api, util_api, util_values, port, unavailable];
         {unix, darwin} ->
             [load_api, util_api, util_values, port, unavailable];
+        {unix, netbsd} -> [unavailable];
         {unix, _OSname} -> [load_api];
         _OS -> [unavailable]
     end.

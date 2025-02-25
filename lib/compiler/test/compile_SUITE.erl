@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -30,15 +30,19 @@
 	 debug_info/4, custom_debug_info/1, custom_compile_info/1,
 	 file_1/1, forms_2/1, module_mismatch/1, outdir/1,
 	 binary/1, makedep/1, cond_and_ifdef/1, listings/1, listings_big/1,
-	 other_output/1, kernel_listing/1, encrypted_abstr/1,
+	 other_output/1, encrypted_abstr/1,
 	 strict_record/1, utf8_atoms/1, utf8_functions/1, extra_chunks/1,
 	 cover/1, env/1, core_pp/1, tuple_calls/1,
 	 core_roundtrip/1, asm/1, asm_labels/1,
 	 sys_pre_attributes/1, dialyzer/1, no_core_prepare/1,
+         beam_ssa_pp_smoke_test/1,
 	 warnings/1, pre_load_check/1, env_compiler_options/1,
          bc_options/1, deterministic_include/1, deterministic_paths/1,
+         deterministic_docs/1,
          compile_attribute/1, message_printing/1, other_options/1,
-         transforms/1, erl_compile_api/1, types_pp/1
+         transforms/1, erl_compile_api/1, types_pp/1, bs_init_writable/1,
+         annotations_pp/1, option_order/1,
+         sys_coverage/1
 	]).
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
@@ -51,14 +55,17 @@ all() ->
     [app_test, appup_test, bigE_roundtrip, file_1,
      forms_2, module_mismatch, outdir,
      binary, makedep, cond_and_ifdef, listings, listings_big,
-     other_output, kernel_listing, encrypted_abstr, tuple_calls,
+     other_output, encrypted_abstr, tuple_calls,
      strict_record, utf8_atoms, utf8_functions, extra_chunks,
      cover, env, core_pp, core_roundtrip, asm, asm_labels, no_core_prepare,
-     sys_pre_attributes, dialyzer, warnings, pre_load_check,
+     sys_pre_attributes, dialyzer, beam_ssa_pp_smoke_test,
+     warnings, pre_load_check,
      env_compiler_options, custom_debug_info, bc_options,
      custom_compile_info, deterministic_include, deterministic_paths,
+     deterministic_docs,
      compile_attribute, message_printing, other_options, transforms,
-     erl_compile_api, types_pp].
+     erl_compile_api, types_pp, bs_init_writable, annotations_pp,
+     option_order, sys_coverage].
 
 groups() -> 
     [].
@@ -139,6 +146,8 @@ file_1(Config) when is_list(Config) ->
 
     {ok,simple} = compile:file(Simple, [no_line_info]), %Coverage
     {ok,simple} = compile:file(Simple, [{eprof,beam_z}]), %Coverage
+    {ok,simple} = compile:file(Simple, [{call_time,beam_z}]), %Coverage
+    {ok,simple} = compile:file(Simple, [{call_memory,beam_z}]), %Coverage
 
     %% Cover option not in a list (undocumented feature).
     {ok,simple} = compile:file(Simple, no_postopt),
@@ -177,6 +186,18 @@ file_1(Config) when is_list(Config) ->
 
     error = compile:file(filename:join(DataDir, "bad_core"), [from_core,report]),
     error = compile:file(filename:join(DataDir, "bad_core_tokens"), [from_core,report]),
+
+    %% Cover handling of obsolete options.
+    ObsoleteOptions = [r18,r19,r20,r21,r22,r23,
+                       no_bsm3,no_get_hd_tl,no_put_tuple2,no_utf8_atoms,
+                       no_swap,no_init_yregs,no_shared_fun_wrappers,no_make_fun3],
+    _ = [begin
+             {error,[{_Simple,
+                      [{none,compile,{obsolete_option,Opt}}]}],
+              []} =
+                 compile:file(Simple, [Opt,return]),
+             error = compile:file(Simple, [Opt,report])
+         end || Opt <- ObsoleteOptions],
 
     %% Create a directory with the same name as the temp file to cover
     %% handling of write errors.
@@ -395,15 +416,22 @@ makedep(Config) when is_list(Config) ->
 
     %% Generate dependencies and compile normally at the same time.
     GeneratedHrl = filename:join(PrivDir, "generated.hrl"),
-    ok = file:write_file(GeneratedHrl, ""),
-    {ok,simple} = compile:file(Simple, [report,makedep_side_effect,
-                                        {makedep_output,Target},
-                                        {i,PrivDir}|IncludeOptions]),
-    {ok,Mf9} = file:read_file(Target),
-    BasicMf3 = iolist_to_binary([string:trim(BasicMf2), " ", filename:join(PrivDir, "generated.hrl"), "\n"]),
-    BasicMf3 = makedep_canonicalize_result(Mf9, DataDir),
-    error = compile:file(Simple, [report,makedep_side_effect,
-                                  {makedep_output,PrivDir}|IncludeOptions]),
+    GeneratedDoc = filename:join(proplists:get_value(data_dir, Config), "foo.md"),
+    try
+        ok = file:write_file(GeneratedHrl, ""),
+        ok = file:write_file(GeneratedDoc, ""),
+        {ok,simple} = compile:file(Simple, [report,makedep_side_effect,
+                                            {makedep_output,Target},
+                                            {i,PrivDir}|IncludeOptions]),
+        {ok,Mf9} = file:read_file(Target),
+        BasicMf3 = iolist_to_binary([string:trim(BasicMf2), " $(srcdir)/foo.md ", filename:join(PrivDir, "generated.hrl"), "\n"]),
+        BasicMf3 = makedep_canonicalize_result(Mf9, DataDir),
+        error = compile:file(Simple, [report,makedep_side_effect,
+                                      {makedep_output,PrivDir}|IncludeOptions])
+    after
+        ok = file:delete(GeneratedHrl),
+        ok = file:delete(GeneratedDoc)
+    end,
 
     %% Cover generation of long lines that must be split.
     CompileModule = filename:join(code:lib_dir(compiler), "src/compile.erl"),
@@ -419,7 +447,6 @@ makedep(Config) when is_list(Config) ->
     error = compile:file(Simple, [report,makedep,{makedep_output,a_bad_output_device}]),
 
     ok = file:delete(Target),
-    ok = file:delete(GeneratedHrl),
     ok = file:del_dir(filename:dirname(Target)),
     ok.
 
@@ -508,7 +535,6 @@ do_file_listings(DataDir, PrivDir, [File|Files]) ->
             {dcore, ".core"},
             {dcopt, ".copt"},
             {dcbsm, ".core_bsm"},
-            {dkern, ".kernel"},
             {dssa, ".ssa"},
             {dbool, ".bool"},
             {dssashare, ".ssashare"},
@@ -528,7 +554,6 @@ do_file_listings(DataDir, PrivDir, [File|Files]) ->
     do_listing(Simple, TargetDir, to_core0, ".core"),
     ok = file:delete(filename:join(TargetDir, File ++ ".core")),
     do_listing(Simple, TargetDir, to_core, ".core"),
-    do_listing(Simple, TargetDir, to_kernel, ".kernel"),
     do_listing(Simple, TargetDir, to_dis, ".dis"),
 
     %% Final clean up.
@@ -544,7 +569,6 @@ listings_big(Config) when is_list(Config) ->
     List = [{'S',".S"},
             {'E',".E"},
             {'P',".P"},
-            {dkern, ".kernel"},
             {dssa, ".ssa"},
             {dssaopt, ".ssaopt"},
             {dprecg, ".precodegen"},
@@ -599,12 +623,6 @@ other_output(Config) when is_list(Config) ->
     io:put_chars("to_core (forms)"),
     {ok,simple,Core} = compile:forms(PP, [to_core,binary,time]),
 
-    io:put_chars("to_kernel (file)"),
-    {ok,simple,Kernel} = compile:file(Simple, [to_kernel,binary,time]),
-    k_mdef = element(1, Kernel),
-    io:put_chars("to_kernel (forms)"),
-    {ok,simple,Kernel} = compile:forms(PP, [to_kernel,binary,time]),
-
     io:put_chars("to_asm (file)"),
     {ok,simple,Asm} = compile:file(Simple, [to_asm,binary,time]),
     {simple,_,_,_,_} = Asm,
@@ -612,33 +630,6 @@ other_output(Config) when is_list(Config) ->
     {ok,simple,Asm} = compile:forms(PP, [to_asm,binary,time]),
 
     ok.
-
-%% Smoke test and cover of pretty-printing of Kernel code.
-kernel_listing(_Config) ->
-    TestBeams = get_unique_beam_files(),
-    Abstr = [begin {ok,{Mod,[{abstract_code,
-			      {raw_abstract_v1,Abstr}}]}} =
-		       beam_lib:chunks(Beam, [abstract_code]),
-		   {Mod,Abstr} end || Beam <- TestBeams],
-    test_lib:p_run(fun(F) -> do_kernel_listing(F) end, Abstr).
-
-do_kernel_listing({M,A}) ->
-    try
-	{ok,M,Kern} = compile:forms(A, [to_kernel]),
-	IoList = v3_kernel_pp:format(Kern),
-	case unicode:characters_to_binary(IoList) of
-	    Bin when is_binary(Bin) ->
-		ok
-	end
-    catch
-	throw:{error,Error} ->
-	    io:format("*** compilation failure '~p' for module ~s\n",
-		      [Error,M]),
-	    error;
-	Class:Error:Stk ->
-	    io:format("~p: ~p ~p\n~p\n", [M,Class,Error,Stk]),
-	    error
-    end.
 
 encrypted_abstr(Config) when is_list(Config) ->
     {Simple,Target} = get_files(Config, simple, "encrypted_abstr"),
@@ -654,7 +645,7 @@ encrypted_abstr(Config) when is_list(Config) ->
 		  OldPath = code:get_path(),
 		  try
 		      NewPath = OldPath -- [filename:dirname(code:which(crypto))],
-		      (catch crypto:stop()),
+		      (catch application:stop(crypto)),
 		      code:delete(crypto),
 		      code:purge(crypto),
 		      code:set_path(NewPath),
@@ -666,7 +657,7 @@ encrypted_abstr(Config) when is_list(Config) ->
 		  %% Now run the tests that require crypto.
 		  encrypted_abstr_1(Simple, Target),
 		  ok = file:delete(Target),
-		  ok = file:del_dir_r(filename:dirname(Target))
+		  _ = file:del_dir_r(filename:dirname(Target))
 	  end,
     
     %% Cleanup.
@@ -730,7 +721,6 @@ encrypted_abstr_1(Simple, Target) ->
     erpc:call(
       Node,
       fun() ->
-              {ok,OldCwd} = file:get_cwd(),
               ok = file:set_cwd(TargetDir),
 
               error = compile:file(Simple, [encrypt_debug_info,report]),
@@ -815,8 +805,8 @@ verify_abstract(Beam, Backend) ->
 
 has_crypto() ->
     try
-	crypto:start(),
-	crypto:stop(),
+	application:start(crypto),
+	application:stop(crypto),
 	true
     catch
 	error:_ -> false
@@ -922,30 +912,30 @@ strict_record(Config) when is_list(Config) ->
     {ok,M} = c:c(M, [no_strict_record_tests|Opts]),
     Turtle = test_sloppy(),
 
-    %% The option first given wins.
-    {ok,M} = c:c(M, [no_strict_record_tests,strict_record_tests|Opts]),
-    Turtle = test_sloppy(),
+    %% The option last given wins.
     {ok,M} = c:c(M, [strict_record_tests,no_strict_record_tests|Opts]),
+    Turtle = test_sloppy(),
+    {ok,M} = c:c(M, [no_strict_record_tests,strict_record_tests|Opts]),
     Turtle = test_strict(),
 
     %% Default (possibly influenced by ERL_COMPILER_OPTIONS).
     {ok,M} = c:c(M, [{outdir,Priv},report_errors]),
     try
-	      {1,2} = record_access:test(Turtle),
-	      {comment,"Default: no_strict_record_tests"}
-	  catch
-	      error:{badrecord,tortoise} ->
-		  {comment,"Default: strict_record_tests"}
-	  end.
+        {1,2} = record_access:test(Turtle),
+        {comment,"Default: no_strict_record_tests"}
+    catch
+        error:{badrecord,Turtle} ->
+            {comment,"Default: strict_record_tests"}
+    end.
 
 test_strict() ->
     Turtle = record_access:turtle(),
     try
-	      record_access:test(Turtle)
-	  catch
-	      error:{badrecord,tortoise} ->
-		  ok
-	  end,
+        record_access:test(Turtle)
+    catch
+        error:{badrecord,Turtle} ->
+            ok
+    end,
     Turtle.
 
 test_sloppy() ->
@@ -954,19 +944,31 @@ test_sloppy() ->
     Turtle.
 
 utf8_atoms(Config) when is_list(Config) ->
+    do_utf8_atom(binary_to_atom(<<"こんにちは"/utf8>>, utf8)),
+
+    LongAtom = binary_to_atom(binary:copy(<<240,159,159,166>>, 255)),
+    do_utf8_atom(LongAtom),
+
+    ok.
+
+do_utf8_atom(Atom) ->
+    Mod = ?FUNCTION_NAME,
     Anno = erl_anno:new(1),
-    Atom = binary_to_atom(<<"こんにちは"/utf8>>, utf8),
-    Forms = [{attribute,Anno,compile,[export_all]},
+    Forms = [{attribute,Anno,module,Mod},
+             {attribute,Anno,compile,[export_all]},
 	     {function,Anno,atom,0,[{clause,Anno,[],[],[{atom,Anno,Atom}]}]}],
 
-    Utf8AtomForms = [{attribute,Anno,module,utf8_atom}|Forms],
-    {ok,utf8_atom,Utf8AtomBin} =
-	compile:forms(Utf8AtomForms, [binary]),
-    {ok,{utf8_atom,[{atoms,_}]}} =
-	beam_lib:chunks(Utf8AtomBin, [atoms]),
-    code:load_binary(utf8_atom, "compile_SUITE", Utf8AtomBin),
-    Atom = utf8_atom:atom(),
+    {ok,Mod,Utf8AtomBin} = compile:forms(Forms, [binary,report]),
+    {ok,{Mod,[{atoms,_}]}} = beam_lib:chunks(Utf8AtomBin, [atoms]),
+
+    code:load_binary(Mod, "compile_SUITE", Utf8AtomBin),
+
+    Atom = Mod:atom(),
     true = is_atom(Atom),
+
+    true = code:delete(Mod),
+    false = code:purge(Mod),
+
     ok.
 
 utf8_functions(Config) when is_list(Config) ->
@@ -1120,7 +1122,7 @@ do_core_pp_1(M, A, Outdir) ->
     compile_forms(M, Core, [clint,ssalint,from_core,binary]),
 
     %% Don't optimize to test that we are not dependent
-    %% on the Core Erlang optmimization passes.
+    %% on the Core Erlang optimization passes.
     %% (Example of a previous bug: The core_parse pass
     %% would not turn map literals into #c_literal{}
     %% records; if sys_core_fold was run it would fix
@@ -1144,7 +1146,16 @@ core_roundtrip(Config) ->
     ok = file:make_dir(Outdir),
 
     TestBeams = get_unique_beam_files(),
-    test_lib:p_run(fun(F) -> do_core_roundtrip(F, Outdir) end, TestBeams).
+
+    Test = fun(F) -> do_core_roundtrip(F, Outdir) end,
+    case erlang:system_info(wordsize) of
+        4 ->
+            %% This test case is very memory intensive. Only
+            %% use a single process.
+            test_lib:p_run(Test, TestBeams, 1);
+        8 ->
+            test_lib:p_run(Test, TestBeams)
+    end.
 
 do_core_roundtrip(Beam, Outdir) ->
     try
@@ -1349,12 +1360,13 @@ do_asm(Beam, Outdir) ->
     {ok,{M,[{abstract_code,{raw_abstract_v1,A}}]}} =
 	beam_lib:chunks(Beam, [abstract_code]),
     try
-	{ok,M,Asm} = compile:forms(A, ['S']),
+        Opts = test_lib:opt_opts(M),
+	{ok,M,Asm} = compile:forms(A, ['S'|Opts]),
 	AsmFile = filename:join(Outdir, atom_to_list(M)++".S"),
 	{ok,Fd} = file:open(AsmFile, [write,{encoding,utf8}]),
 	beam_listing:module(Fd, Asm),
 	ok = file:close(Fd),
-	case compile:file(AsmFile, [from_asm,binary,report]) of
+        case compile:file(AsmFile, [from_asm,binary,report|Opts]) of
 	    {ok,M,_} ->
 		ok = file:delete(AsmFile);
 	    Other ->
@@ -1432,14 +1444,44 @@ dialyzer(Config) ->
     [{a,b,c}] = M:M(),
     ok.
 
+beam_ssa_pp_smoke_test(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Outdir = filename:join(PrivDir, atom_to_list(?FUNCTION_NAME)),
+    ok = file:make_dir(Outdir),
+    TestBeams = get_unique_beam_files(),
+    test_lib:p_run(fun(F) -> beam_ssa_pp(F, Outdir) end, TestBeams).
+
+beam_ssa_pp(Beam, Outdir) ->
+    try
+	{ok,{Mod,[{abstract_code,{raw_abstract_v1,Abstr}}]}} =
+	    beam_lib:chunks(Beam, [abstract_code]),
+	beam_ssa_pp_1(Mod, Abstr, Outdir)
+    catch
+	throw:{error,Error} ->
+	    io:format("*** compilation failure '~p' for file ~s\n",
+		      [Error,Beam]),
+	    error;
+	Class:Error:Stk ->
+	    io:format("~p: ~p ~p\n~p\n", [Beam,Class,Error,Stk]),
+	    error
+    end.
+
+beam_ssa_pp_1(Mod, Abstr, Outdir) ->
+    Opts = test_lib:opt_opts(Mod),
+    {ok,Mod,SSA} = compile:forms(Abstr, [dssaopt|Opts]),
+    ListFile = filename:join(Outdir, atom_to_list(Mod) ++ ".ssaopt"),
+    {ok,Fd} = file:open(ListFile, [write,{encoding,utf8}]),
+    beam_listing:module(Fd, SSA),
+    ok = file:close(Fd).
 
 %% Test that warnings contain filenames and line numbers.
 warnings(_Config) ->
-    Files = get_unique_files(".erl"),
+    Files = test_lib:get_unique_files(".erl"),
     test_lib:p_run(fun do_warnings/1, Files).
 
 do_warnings(F) ->
-    {ok,_,_,Ws} = compile:file(F, [binary,bin_opt_info,recv_opt_info,return]),
+    Options = [{feature,maybe_expr,enable},binary,bin_opt_info,recv_opt_info,return],
+    {ok,_,_,Ws} = compile:file(F, Options),
     do_warnings_1(Ws, F).
 
 do_warnings_1([{"no_file",Ws}|_], F) ->
@@ -1472,8 +1514,9 @@ do_warnings_2([], Next, F) ->
 
 message_printing(Config) ->
     DataDir = proplists:get_value(data_dir, Config),
-    BadEncFile = filename:join(DataDir, "bad_enc.erl"),
+    PrivDir = proplists:get_value(priv_dir, Config),
 
+    BadEncFile = filename:join(DataDir, "bad_enc.erl"),
     {error,BadEncErrors, []} = compile:file(BadEncFile, [return]),
 
     [":7:15: cannot parse file, giving up\n"
@@ -1498,6 +1541,24 @@ message_printing(Config) ->
      "%    6|     B = <<\"xyzåäö\">>,\t<<\"12345\">>,\n"
      "%     |                      \t^\n\n"
     ] = messages(Latin1Errors),
+
+    LongFile = filename:join(PrivDir, "long.erl"),
+    Long = ["-module(long).\n",
+            "-export([foo/0]).\n",
+            "unused() -> ok.\n",
+            lists:duplicate(10000, $\n),
+            "foo() -> bar().\n"],
+    ok = file:write_file(LongFile, Long),
+    {error,LongErrors,LongWarnings} = compile:file(LongFile, [return]),
+    [":10004:10: function bar/0 undefined\n"
+     "% 10004| foo() -> bar().\n"
+     "%      |          ^\n\n"
+    ] = messages(LongErrors),
+    [":3:1: function unused/0 is unused\n"
+     "%    3| unused() -> ok.\n"
+     "%     | ^\n\n"
+    ] = messages(LongWarnings),
+    ok = file:delete(LongFile),
 
     {ok,OldCwd} = file:get_cwd(),
     try
@@ -1536,7 +1597,7 @@ pre_load_check(Config) ->
             try
                 do_pre_load_check(Config)
             after
-                dbg:stop_clear()
+                dbg:stop()
             end
     end.
 
@@ -1659,48 +1720,39 @@ bc_options(Config) ->
 
     DataDir = proplists:get_value(data_dir, Config),
 
-    L = [{101, small_float, [no_shared_fun_wrappers,no_line_info]},
-         {125, small_float, [no_shared_fun_wrappers,
-                             no_line_info,
-                             no_ssa_opt_float,
-                             no_type_opt]},
+    L = [{177, small_float, []},
 
-         {153, small_float, [no_shared_fun_wrappers]},
+         {177, small, [no_ssa_opt_record,
+                       no_ssa_opt_float,
+                       no_line_info,
+                       no_type_opt,
+                       no_bs_match]},
 
-         {164, small_maps, [no_init_yregs,no_shared_fun_wrappers,no_type_opt]},
-         {164, small_maps, [r22]},
-         {164, big, [r22]},
-         {164, funs, [r22]},
-         {164, funs, [no_init_yregs,no_shared_fun_wrappers,
-                      no_ssa_opt_record,
-                      no_line_info,no_stack_trimming,
-                      no_make_fun3,no_type_opt]},
-
-         {168, small, [r22]},
-         {168, small, [no_init_yregs,no_shared_fun_wrappers,
-                       no_ssa_opt_record,no_make_fun3,
-                       no_ssa_opt_float,no_line_info,no_type_opt]},
-         {169, small, [r23]},
-
-         {169, big, [no_init_yregs,no_shared_fun_wrappers,
-                     no_ssa_opt_record,
-                     no_line_info,no_stack_trimming,
-                     no_make_fun3,no_type_opt]},
-         {169, big, [r23]},
-
-         {169, small_maps, [no_init_yregs,no_type_opt]},
-
-         {171, big, [no_init_yregs,no_shared_fun_wrappers,
-                     no_ssa_opt_record,
-                     no_ssa_opt_float,no_line_info,
-                     no_type_opt]},
-         {171, funs, [no_init_yregs,no_shared_fun_wrappers,
-                      no_ssa_opt_record,
-                      no_ssa_opt_float,no_line_info,
+         {177, funs, [no_ssa_opt_record,
+                      no_ssa_opt_float,
+                      no_line_info,
+                      no_stack_trimming,
                       no_type_opt]},
 
+         {177, small_maps, [no_type_opt]},
+
+         {177, big, [no_ssa_opt_record,
+                     no_ssa_opt_float,
+                     no_line_info,
+                     no_type_opt]},
+
+         {178, small, [r25]},
+         {178, big, [r25]},
          {178, funs, []},
-         {178, big, []}
+         {178, big, []},
+
+         {182, small, [r26]},
+         {182, small, []},
+
+         {183, small, [line_coverage]},
+
+         {184, small, [beam_debug_info]},
+         {184, big, [beam_debug_info]}
         ],
 
     Test = fun({Expected,Mod,Options}) ->
@@ -1761,6 +1813,28 @@ deterministic_paths_1(DataDir, Name, Opts) ->
     after
         file:set_cwd(Cwd)
     end.
+
+%% The test case uses ssh.erl from ssh application.
+deterministic_docs(Config) when is_list(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    Filepath = filename:join(DataDir, "ssh"),
+    true = deterministic_docs_1(Filepath, [binary, deterministic], 25),
+    ok.
+
+deterministic_docs_1(Filepath, Opts, Checks) ->
+    {ok, _, Reference} = compile:file(Filepath, Opts),
+    lists:all(
+      fun(_) ->
+              {ok, Peer, Node} = ?CT_PEER(#{}),
+              {ok, _, Testing} =
+                  erpc:call(
+                    Node,
+                    fun() ->
+                            compile:file(Filepath, Opts)
+                    end),
+              peer:stop(Peer),
+              Testing =:= Reference
+      end, lists:seq(1, Checks)).
 
 %% ERL-1058: -compile(debug_info) had no effect
 compile_attribute(Config) when is_list(Config) ->
@@ -2015,9 +2089,9 @@ types_pp(Config) when is_list(Config) ->
                      "{any(), any(), any(), any(), any()}"},
                     {make_inexact_tuple, "{any(), any(), any(), ...}"},
                     {make_union,
-                     "'foo' | nonempty_list(1..3) | number() |"
-                     " {'tag0', 1, 2} | {'tag1', 3, 4} | bitstring(24)"},
-                    {make_bitstring, "bitstring(24)"},
+                     "'foo' | nonempty_list(1..3) | number(3, 7) |"
+                     " {'tag0', 1, 2} | {'tag1', 3, 4} | bitstring(8)"},
+                    {make_bitstring, "bitstring(8)"},
                     {make_none, "none()"}],
     lists:foreach(fun({FunName, Expected}) ->
                           Actual = map_get(atom_to_list(FunName), ResultTypes),
@@ -2032,26 +2106,260 @@ types_pp(Config) when is_list(Config) ->
     ok = file:del_dir_r(TargetDir),
     ok.
 
-%% We assume that a call starts with a "Result type:"-line followed by
-%% a type line, which is followed by an optional annotation before the
-%% actual call.
+%% Parsing for result types. Remember the last seen "Result type"
+%% annotation and apply it to calls when we see them to a call when we
+%% see them.
 get_result_types(Lines) ->
-    get_result_types(Lines, #{}).
+    get_result_types(Lines, none, #{}).
 
-get_result_types(["  %% Result type:"++_,"  %%    "++TypeLine|Lines], Acc) ->
+get_result_types(["  %% Result type:"++_,"  %%    "++TypeLine|Lines], _, Acc) ->
     get_result_types(Lines, TypeLine, Acc);
-get_result_types([_|Lines], Acc) ->
-    get_result_types(Lines, Acc);
-get_result_types([], Acc) ->
+get_result_types([Line|Lines], TypeLine, Acc0) ->
+    Split = string:split(Line, "="),
+    Acc = case Split of
+              [_, " call" ++ Rest] ->
+                  case string:split(Rest, "`", all) of
+                      [_,Callee,_] ->
+                          Acc0#{ Callee => TypeLine };
+                      _ ->
+                          Acc0
+                  end;
+              _ ->
+                  Acc0
+          end,
+    get_result_types(Lines, TypeLine, Acc);
+get_result_types([], _, Acc) ->
     Acc.
 
-get_result_types(["  %% Anno: "++_|Lines], TypeLine, Acc) ->
-    get_result_types(Lines, TypeLine, Acc);
-get_result_types([CallLine|Lines], TypeLine, Acc) ->
-    [_,Callee,_] = string:split(CallLine, "`", all),
-    get_result_types(Lines, Acc#{ Callee => TypeLine }).
+%% Check that the beam_ssa_type pass knows about bs_init_writable.
+bs_init_writable(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    PrivDir = proplists:get_value(priv_dir, Config),
+    InFile = filename:join(DataDir, "bs_init_writable.erl"),
+    OutDir = filename:join(PrivDir, "bs_init_writable"),
+    OutFile = filename:join(OutDir, "bs_init_writable.S"),
+    ok = file:make_dir(OutDir),
+    {ok,bs_init_writable} = compile:file(InFile, ['S',{outdir,OutDir}]),
+    {ok,Listing} = file:read_file(OutFile),
+    Os = [global,multiline,{capture,all_but_first,list}],
+    %% The is_bitstr test should be optimized away.
+    nomatch = re:run(Listing, "({test,is_bitstr,.+})", Os),
+    %% The is_bitstr test should be optimized away.
+    nomatch = re:run(Listing, "({test,is_binary,.+})", Os),
+    ok = file:del_dir_r(OutDir).
 
 
+%% Check that an SSA listing contains pretty printed annotations, this
+%% blindly checks that the expected annotation occurs the expected
+%% number of times. Checking that the annotations are correctly placed
+%% and contains the correct information is done in
+%% beam_ssa_check_SUITE.
+annotations_pp(Config) when is_list(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    PrivDir = proplists:get_value(priv_dir, Config),
+    TargetDir = filename:join(PrivDir, types_pp),
+    File = filename:join(DataDir, "annotations_pp.erl"),
+    Listing = filename:join(TargetDir, "annotations_pp.ssaopt"),
+    ok = file:make_dir(TargetDir),
+
+    {ok,_} = compile:file(File, [dssaopt, {outdir, TargetDir}]),
+    {ok, Data} = file:read_file(Listing),
+    Lines = string:split(binary_to_list(Data), "\n", all),
+
+    ResultTypes = get_annotations("  %% Result type:", Lines),
+    10 = length(ResultTypes),
+
+    Uniques = get_annotations("  %% Unique:", Lines),
+    10 = length(Uniques),
+
+    Aliased = get_annotations("  %% Aliased:", Lines),
+    13 = length(Aliased),
+
+    ok = file:del_dir_r(TargetDir),
+    ok.
+
+get_annotations(Key, [Key,"  %%    "++Anno|Lines]) ->
+    [Anno|get_annotations(Key, Lines)];
+get_annotations(Key, [_|Lines]) ->
+    get_annotations(Key, Lines);
+get_annotations(_, []) ->
+    [].
+
+option_order(Config) ->
+    Ts = [{spec1,
+           ~"""
+            -compile(nowarn_missing_spec).
+            foo() -> ok.
+            """,
+           [],                                  %Environment
+           [warn_missing_spec],
+           []},
+          {spec2,
+           ~"""
+            foo() -> ok.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "warn_missing_spec"}],
+           [nowarn_missing_spec],
+           []},
+          {spec3,
+           ~"""
+            -compile(nowarn_missing_spec).
+            foo() -> ok.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "nowarn_missing_spec"}],
+           [warn_missing_spec],
+           []},
+          {spec4,
+           ~"""
+            -compile(warn_missing_spec).
+            foo() -> ok.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "nowarn_missing_spec"}],
+           [],
+           {warnings,[{{2,1},erl_lint,{missing_spec,{foo,0}}}]}
+          },
+          {spec5,
+           ~"""
+            -compile([warn_missing_spec,nowarn_missing_spec]).
+            foo() -> ok.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "nowarn_missing_spec"}],
+           [warn_missing_spec],
+           []},
+          {records1,
+           ~"""
+            -record(r, {x,y}).
+            rec_test(#r{x=X,y=Y}) -> X + Y.
+            """,
+           [],
+           [strict_record_tests],
+           fun(M) ->
+                   try M:rec_test({r,1,2,3}) of
+                       3 ->
+                           fail()
+                   catch
+                       error:function_clause ->
+                           ok
+                   end
+           end},
+          {records2,
+           ~"""
+            -record(r, {x,y}).
+            rec_test(R) -> R#r.x + R#r.y.
+            """,
+           [],
+           [no_strict_record_tests],
+           fun(M) ->
+                   3 = M:rec_test({r,1,2,3}),
+                   ok
+           end},
+          {records3,
+           ~"""
+            -compile(no_strict_record_tests).
+            -record(r, {x,y}).
+            rec_test(R) -> R#r.x + R#r.y.
+            """,
+           [],
+           [strict_record_tests],
+           fun(M) ->
+                   3 = M:rec_test({r,1,2,3}),
+                   ok
+           end},
+          {records4,
+           ~"""
+            -record(r, {x,y}).
+            rec_test(#r{x=X,y=Y}) -> X + Y.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "strict_record_tests"}],
+           [],
+           fun(M) ->
+                   try M:rec_test({r,1,2,3}) of
+                       3 ->
+                           fail()
+                   catch
+                       error:function_clause ->
+                           ok
+                   end
+           end},
+          {records5,
+           ~"""
+            -record(r, {x,y}).
+            rec_test(R) -> R#r.x + R#r.y.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "strict_record_tests"}],
+           [no_strict_record_tests],
+           fun(M) ->
+                   3 = M:rec_test({r,1,2,3}),
+                   ok
+           end},
+          {records6,
+           ~"""
+            -compile(no_strict_record_tests).
+            -record(r, {x,y}).
+            rec_test(R) -> R#r.x + R#r.y.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "strict_record_tests"}],
+           [],
+           fun(M) ->
+                   3 = M:rec_test({r,1,2,3}),
+                   ok
+           end},
+          {records7,
+           ~"""
+            -record(r, {x,y}).
+            rec_test(R) -> R#r.x + R#r.y.
+            """,
+           [{"ERL_COMPILER_OPTIONS", "no_strict_record_tests"}],
+           [no_strict_record_tests, strict_record_tests],
+           fun(M) ->
+                   try M:rec_test({r,1,2,3}) of
+                       3 ->
+                           fail()
+                   catch
+                       error:{badrecord,{r,1,2,3}} ->
+                           ok
+                   end
+           end}
+
+         ],
+    run(Config, Ts),
+    ok.
+
+sys_coverage(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+
+    sys_coverage_1(DataDir),
+    sys_coverage_2(DataDir),
+
+    ok.
+
+%% Make sure that the `line_coverage` option will not change line
+%% numbers in exceptions.
+sys_coverage_1(DataDir) ->
+    Mod = exceptions,
+    Source = filename:join(DataDir, "exceptions"),
+    {ok,Mod,Code} = compile:file(Source, [line_coverage,binary,report]),
+    {module,Mod} = code:load_binary(Mod, "", Code),
+
+    Mod:Mod(DataDir),
+
+    true = code:delete(Mod),
+    false = code:purge(Mod),
+
+    ok.
+
+%% Make sure that the `line_coverage` option given in the `compile`
+%% attribute in a module works.
+sys_coverage_2(DataDir) ->
+    Mod = embedded_line_coverage,
+    Source = filename:join(DataDir, "embedded_line_coverage"),
+    {ok,Mod,Asm} = compile:file(Source, ['S',binary,report]),
+
+    {Mod,_,_,Fs,_} = Asm,
+    [{function,add,2,_,Is}|_] = Fs,
+    true = lists:keymember(executable_line, 1, Is),
+
+    ok.
 
 %%%
 %%% Utilities.
@@ -2066,19 +2374,105 @@ compile_and_verify(Name, Target, Opts) ->
     Opts = BeamOpts.
 
 get_unique_beam_files() ->
-    get_unique_files(".beam").
+    test_lib:get_unique_files(".beam").
 
-get_unique_files(Ext) ->
-    Wc = filename:join(filename:dirname(code:which(?MODULE)), "*"++Ext),
-    [F || F <- filelib:wildcard(Wc),
-	  not is_cloned(F, Ext), not is_lfe_module(F, Ext)].
+%% Compiles a test module and returns the list of errors and warnings.
 
-is_cloned(File, Ext) ->
-    Mod = list_to_atom(filename:basename(File, Ext)),
-    test_lib:is_cloned_mod(Mod).
+run(Config, Tests) ->
+    F = fun({N,P,Env,Ws,Run}, _BadL) when is_function(Run, 1) ->
+                case catch run_test(Config, P, Env, Ws, Run) of
+                    ok ->
+                        ok;
+                    Bad ->
+                        io:format("~nTest ~p failed. Expected~n  ~p~n"
+                                  "but got~n  ~p~n", [N, ok, Bad]),
+                        fail()
+                end;
+           ({N,P,Env,Ws,Expected}, BadL)
+              when is_list(Expected); is_tuple(Expected) ->
+                io:format("### ~s\n", [N]),
+                case catch run_test(Config, P, Env, Ws, none) of
+                    Expected ->
+                        BadL;
+                    Bad ->
+                        io:format("~nTest ~p failed. Expected~n  ~p~n"
+                                  "but got~n  ~p~n", [N, Expected, Bad]),
+			fail()
+                end
+        end,
+    lists:foldl(F, [], Tests).
 
-is_lfe_module(File, Ext) ->
-    case filename:basename(File, Ext) of
-	"lfe_" ++ _ -> true;
-	_ -> false
+run_test(Conf, Test0, Env, Options, Run) ->
+    run_test_putenv(Env),
+    Module = "warnings" ++ test_lib:uniq(),
+    Filename = Module ++ ".erl",
+    DataDir = proplists:get_value(priv_dir, Conf),
+    Test1 = ["-module(", Module, "). -file( \"", Filename, "\", 1). ", Test0],
+    Test = iolist_to_binary(Test1),
+    File = filename:join(DataDir, Filename),
+    Opts = [binary,export_all,return|Options],
+    ok = file:write_file(File, Test),
+
+    %% Compile once just to print all warnings (and cover more code).
+    _ = compile:file(File, [binary,export_all,report|Options]),
+
+    %% Test result of compilation.
+    {ok, Mod, Beam, Warnings} = compile:file(File, Opts),
+    _ = file:delete(File),
+
+    if
+        is_function(Run, 1) ->
+            {module,Mod} = code:load_binary(Mod, "", Beam),
+            ok = Run(Mod),
+            run_test_unsetenv(Env),
+            true = code:delete(Mod),
+            _ = code:purge(Mod),
+            ok;
+        Run =:= none ->
+            run_test_unsetenv(Env),
+            Res = get_warnings(Warnings),
+            case Res of
+                [] ->
+                    [];
+                {warnings, Ws} ->
+                    print_warnings(Ws, Test),
+                    Res
+            end
     end.
+
+run_test_putenv(Env) ->
+    _ = [_ = os:putenv(Name, Value) || {Name,Value} <- Env],
+    ok.
+
+run_test_unsetenv(Env) ->
+    _ = [_ = os:unsetenv(Name) || {Name,_Value} <- Env],
+    ok.
+
+get_warnings([]) ->
+    [];
+get_warnings(WsL) ->
+    case WsL of
+        [{_File,Ws}] -> {warnings, Ws};
+        _ -> {warnings, WsL}
+    end.
+
+print_warnings(Warnings, Source) ->
+    Lines = binary:split(Source, <<"\n">>, [global]),
+    Cs = [print_warning(W, Lines) || W <- Warnings],
+    io:put_chars(Cs),
+    ok.
+
+print_warning({{LineNum,Column},Mod,Data}, Lines) ->
+    Line0 = lists:nth(LineNum, Lines),
+    <<Line1:(Column-1)/binary,_/binary>> = Line0,
+    Spaces = re:replace(Line1, <<"[^\t]">>, <<" ">>, [global]),
+    CaretLine = [Spaces,"^"],
+    [io_lib:format("~p:~p: ~ts\n",
+                   [LineNum,Column,Mod:format_error(Data)]),
+     Line0, "\n",
+     CaretLine, "\n\n"];
+print_warning(_, _) ->
+    [].
+
+fail() ->
+    ct:fail(failed).

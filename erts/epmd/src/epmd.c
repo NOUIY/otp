@@ -2,7 +2,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1998-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2025. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -523,7 +523,9 @@ static void free_all_nodes(EpmdVars *g)
 	free(tmp);
     }
 }
-void epmd_cleanup_exit(EpmdVars *g, int exitval)
+
+__decl_noreturn void __noreturn
+epmd_cleanup_exit(EpmdVars *g, int exitval)
 {
   int i;
 

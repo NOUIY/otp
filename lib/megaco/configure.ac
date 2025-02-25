@@ -2,7 +2,7 @@ dnl Process this file with autoconf to produce a configure script. -*-m4-*-
 dnl
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 2001-2021. All Rights Reserved.
+dnl Copyright Ericsson AB 2001-2024. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -25,13 +25,15 @@ dnl define([AC_CACHE_SAVE], )dnl
 
 AC_INIT
 AC_CONFIG_SRCDIR([vsn.mk])
-AC_PREREQ([2.71])
+AC_PREREQ([2.72])
 
 m4_include([otp.m4])
 
 AC_CONFIG_AUX_DIR([${ERL_TOP}/make/autoconf])
 
 ERL_CANONICAL_SYSTEM_TYPE
+
+ERL_PUSH_WERROR
 
 dnl ----------------------------------------------------------------------
 dnl Checks for programs.
@@ -162,32 +164,14 @@ if test "x$GCC" = xyes; then
   LM_TRY_ENABLE_CFLAG([-Werror=return-type], [CFLAGS])
 fi
 
-dnl ----------------------------------------------------------------------
-dnl Enable -fsanitize= flags.
-dnl ----------------------------------------------------------------------
-
-m4_define(DEFAULT_SANITIZERS, [address,undefined])
-AC_ARG_ENABLE(
-    sanitizers,
-    AS_HELP_STRING(
-        [--enable-sanitizers@<:@=comma-separated list of sanitizers@:>@],
-	    [Default=DEFAULT_SANITIZERS]),
-[
-case "$enableval" in
-    no) sanitizers= ;;
-    yes) sanitizers="-fsanitize=DEFAULT_SANITIZERS" ;;
-    *) sanitizers="-fsanitize=$enableval" ;;
-esac
-CFLAGS="$CFLAGS $sanitizers"
-LDFLAGS="$LDFLAGS $sanitizers"
-])
-
 ERL_DED
 
 AC_CHECK_PROG(PERL, perl, perl, no_perl)
 if test "$PERL" = no_perl; then
   AC_MSG_ERROR([Perl is required to build the flex scanner!])
 fi
+
+ERL_POP_WERROR
 
 AC_CONFIG_FILES([examples/meas/Makefile:examples/meas/Makefile.in])
 AC_OUTPUT

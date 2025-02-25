@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2006-2019. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -48,6 +48,17 @@
 %%----------------------------------------------------------------------
 
 -module(megaco_codec_mstone2).
+-moduledoc """
+This module implements a simple megaco codec-based performance tool.
+
+This module implements the _mstone2_ tool, a simple megaco codec-based
+performance tool.
+
+The results, the mstone value(s), are written to stdout.
+
+_Note_ that this module is _not_ included in the runtime part of the
+application.
+""".
 
 
 %% Exports
@@ -101,10 +112,22 @@
 %%% API
 %%%----------------------------------------------------------------------
 
+-doc(#{equiv => start/1}).
 start() ->
     do_start(?DEFAULT_FACTOR,
              ?DEFAULT_RUN_TIME, ?DEFAULT_MODE, ?DEFAULT_MESSAGE_PACKAGE).
 
+-doc """
+start(MessagePackage)
+
+This function starts the _mstone2_ performance test with all codec configs.
+Processes are created dynamically. Each process make _one_ run through their
+messages (decoding and encoding messages) and then exits. When one process
+exits, a new is created with the same codec config and set of messages.
+
+The number of messages processed in total (for all processes) is the mstone
+value.
+""".
 start([RunTimeAtom, Mode, MessagePackage])
   when is_atom(RunTimeAtom) andalso
        is_atom(Mode) andalso
@@ -113,11 +136,12 @@ start([RunTimeAtom, Mode, MessagePackage])
              ?LIB:parse_runtime(RunTimeAtom), Mode, MessagePackage);
 start(RunTime) when is_integer(RunTime) andalso (RunTime > 0) ->
     do_start(?DEFAULT_FACTOR,
-             time:minutes(RunTime), ?DEFAULT_MODE, ?DEFAULT_MESSAGE_PACKAGE);
+             timer:minutes(RunTime), ?DEFAULT_MODE, ?DEFAULT_MESSAGE_PACKAGE);
 start(MessagePackage) ->
     do_start(?DEFAULT_FACTOR,
              ?DEFAULT_RUN_TIME, ?DEFAULT_MODE, MessagePackage).
 
+-doc false.
 start(RunTime, Mode)
   when is_integer(RunTime) andalso
        (RunTime > 0) andalso
@@ -145,6 +169,7 @@ start(Mode, MessagePackage)
     do_start(?DEFAULT_FACTOR,
              ?DEFAULT_RUN_TIME, Mode, MessagePackage).
 
+-doc false.
 start(RunTime, Mode, MessagePackage)
   when is_integer(RunTime) andalso
        (RunTime > 0) andalso
@@ -167,6 +192,7 @@ start(Factor, RunTime, Mode)
              timer:minutes(RunTime), Mode, ?DEFAULT_MESSAGE_PACKAGE).
 
 
+-doc false.
 start(Factor, RunTime, Mode, MessagePackage)
   when is_integer(Factor) andalso
        (Factor > 0) andalso
@@ -304,30 +330,26 @@ loader(Factor, RunTime, Mode, Codecs, MessagePackage) ->
     case (catch init(Factor, RunTime, Mode, Codecs, MessagePackage)) of
 	{ok, State} ->
 	    loader_loop(running, State);
-	Error ->
+	{error, Reason} = Error ->
+            io:format("<ERROR> Failed starting loader: "
+                      "~n      ~p", [Reason]),
 	    exit(Error)
     end.
 
 init(Factor, RunTime, Mode, Codecs, MessagePackage) ->
     ets:new(mstone, [set, private, named_table, {keypos, 1}]),
     ets:insert(mstone, {worker_cnt, 0}),
-    case ?LIB:start_flex_scanner() of
-        {Pid, FlexConf} when is_pid(Pid) ->
-            io:format("prepare messages", []),
-            EMessages = ?LIB:expanded_messages(MessagePackage, Codecs, Mode), 
-            io:format("~ninit codec data", []),
-            CodecData = init_codec_data(Factor, EMessages, FlexConf),
-            Timer = erlang:send_after(RunTime, self(), mstone_finished), 
-            io:format(" => ~w concurrent workers~n", [length(CodecData)]),
-            {ok, #state{timer        = Timer, 
-                        idle         = CodecData, 
-                        flex_handler = Pid, 
-                        flex_conf    = FlexConf}};
-        {error, Reason} = ERROR ->
-            io:format("<ERROR> Failed starting flex scanner: "
-                      "~n      ~p", [Reason]),
-            ERROR
-    end.
+    {Pid, FlexConf} = ?LIB:start_flex_scanner(),
+    io:format("prepare messages", []),
+    EMessages = ?LIB:expanded_messages(MessagePackage, Codecs, Mode), 
+    io:format("~ninit codec data", []),
+    CodecData = init_codec_data(Factor, EMessages, FlexConf),
+    Timer = erlang:send_after(RunTime, self(), mstone_finished), 
+    io:format(" => ~w concurrent workers~n", [length(CodecData)]),
+    {ok, #state{timer        = Timer, 
+                idle         = CodecData, 
+                flex_handler = Pid, 
+                flex_conf    = FlexConf}}.
 
 init_codec_data(Factor, EMsgs, FlexConf) ->
     init_codec_data_expand(Factor, init_codec_data(EMsgs, FlexConf)).
@@ -345,7 +367,7 @@ init_codec_data(Codec, Mod, Conf0, Msgs0, FlexConf)
   when is_atom(Codec) andalso 
        is_atom(Mod)   andalso 
        is_list(Conf0) andalso 
-       is_list(Msgs0)  ->
+       is_list(Msgs0) ->
     io:format(".", []),
     Conf = [{version3,?VERSION3}|init_codec_conf(FlexConf, Conf0)], 
     Msgs = [?LIB:detect_version(Mod, Conf, Bin) || {_, Bin} <- Msgs0],

@@ -2,7 +2,7 @@
 %% 
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2020. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,8 +20,9 @@
 %%
 {application, stdlib,
  [{description, "ERTS  CXC 138 10"},
-  {vsn, "3.16.1"},
-  {modules, [array,
+  {vsn, "6.2"},
+  {modules, [argparse,
+	     array,
 	     base64,
 	     beam_lib,
 	     binary,
@@ -36,7 +37,10 @@
 	     digraph,
 	     digraph_utils,
 	     edlin,
+	     edlin_key,
+	     edlin_context,
 	     edlin_expand,
+	     edlin_type_suggestion,
 	     epp,
 	     eval_bits,
              erl_abstract_code,
@@ -46,6 +50,7 @@
 	     erl_error,
 	     erl_eval,
              erl_expand_records,
+             erl_features,
 	     erl_internal,
 	     erl_lint,
 	     erl_parse,
@@ -73,6 +78,7 @@
 	     io_lib_format,
 	     io_lib_fread,
 	     io_lib_pretty,
+             json,
 	     lists,
 	     log_mf_h,
 	     maps,
@@ -95,6 +101,8 @@
 	     shell,
 	     shell_default,
 	     shell_docs,
+	     shell_docs_markdown,
+	     shell_docs_test,
 	     slave,
 	     sofs,
 	     string,
@@ -111,6 +119,6 @@
                dets]},
   {applications, [kernel]},
   {env, []},
-  {runtime_dependencies, ["sasl-3.0","kernel-7.0","erts-12.0","crypto-4.5",
-			  "compiler-5.0"]}
+  {runtime_dependencies, ["sasl-3.0","kernel-10.0","erts-15.0","crypto-4.5",
+			  "compiler-5.0", "syntax_tools-3.2.1"]}
 ]}.

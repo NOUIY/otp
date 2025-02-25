@@ -25,6 +25,7 @@
 %% @doc EUnit server process
 
 -module(eunit_server).
+-moduledoc false.
 
 -export([start/1, stop/1, start_test/4, watch/3, watch_path/3,
 	 watch_regexp/3]).
@@ -201,7 +202,10 @@ server_command(From, {start, Job}, St) ->
 server_command(From, stop, St) ->
     %% unregister the server name and let remaining jobs finish
     server_command_reply(From, {error, stopped}),
-    catch unregister(St#state.name),
+    try unregister(St#state.name)
+    catch
+        error:badarg -> ok
+    end,
     server(St#state{stopped = true});
 server_command(From, {watch, Target, _Opts}, St) ->
     %% the code watcher is only started on demand
@@ -243,7 +247,8 @@ start_job(Job, From, Reference, St) ->
     From ! {start, Reference},
     %% The default is to run tests in order unless otherwise specified
     Order = proplists:get_value(order, Job#job.options, inorder),
-    eunit_proc:start(Job#job.test, Order, Job#job.super, Reference),
+    eunit_proc:start(Job#job.test, Order, Job#job.super, Reference,
+                     Job#job.options),
     St#state{jobs = dict:store(Reference, From, St#state.jobs)}.
 
 handle_done(Reference, St) ->

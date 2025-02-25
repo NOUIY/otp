@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Zlib
 
 #include "../core/api-build_p.h"
-#if !defined(ASMJIT_NO_ARM)
+#if !defined(ASMJIT_NO_AARCH64)
 
 #include "../core/formatter.h"
 #include "../core/funcargscontext_p.h"
@@ -12,6 +12,8 @@
 #include "../core/support.h"
 #include "../core/type.h"
 #include "../arm/a64emithelper_p.h"
+#include "../arm/a64formatter_p.h"
+#include "../arm/a64instapi_p.h"
 #include "../arm/a64operand.h"
 
 ASMJIT_BEGIN_SUB_NAMESPACE(a64)
@@ -115,7 +117,7 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitRegMove(
       case TypeId::kUInt32:
       case TypeId::kInt64:
       case TypeId::kUInt64:
-        return emitter->mov(src.as<Gp>().x(), dst.as<Gp>().x());
+        return emitter->mov(dst.as<Gp>().x(), src.as<Gp>().x());
 
       default: {
         if (TypeUtils::isFloat32(typeId) || TypeUtils::isVec32(typeId))
@@ -167,7 +169,7 @@ Error EmitHelper::emitArgMove(
 
   if (TypeUtils::isInt(dstTypeId)) {
     if (TypeUtils::isInt(srcTypeId)) {
-      uint32_t x = dstSize == 8;
+      uint32_t x = uint32_t(dstSize == 8);
 
       dst.setSignature(OperandSignature{x ? uint32_t(GpX::kSignature) : uint32_t(GpW::kSignature)});
       _emitter->setInlineComment(comment);
@@ -184,7 +186,7 @@ Error EmitHelper::emitArgMove(
           case TypeId::kInt16: instId = Inst::kIdLdrsh; break;
           case TypeId::kUInt16: instId = Inst::kIdLdrh; break;
           case TypeId::kInt32: instId = x ? Inst::kIdLdrsw : Inst::kIdLdr; break;
-          case TypeId::kUInt32: instId = Inst::kIdLdr; x = 0; break;
+          case TypeId::kUInt32: instId = Inst::kIdLdr; break;
           case TypeId::kInt64: instId = Inst::kIdLdr; break;
           case TypeId::kUInt64: instId = Inst::kIdLdr; break;
           default:
@@ -298,7 +300,6 @@ struct PrologEpilogInfo {
   }
 };
 
-// TODO: [ARM] Emit prolog.
 ASMJIT_FAVOR_SIZE Error EmitHelper::emitProlog(const FuncFrame& frame) {
   Emitter* emitter = _emitter->as<Emitter>();
 
@@ -310,6 +311,12 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitProlog(const FuncFrame& frame) {
     { Inst::kIdStr  , Inst::kIdStp   },
     { Inst::kIdStr_v, Inst::kIdStp_v }
   }};
+
+  // Emit: 'bti' (indirect branch protection).
+  if (frame.hasIndirectBranchProtection()) {
+    // TODO: The instruction is not available at the moment (would be ABI break).
+    // ASMJIT_PROPAGATE(emitter->bti());
+  }
 
   uint32_t adjustInitialOffset = pei.sizeTotal;
 
@@ -338,7 +345,7 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitProlog(const FuncFrame& frame) {
       else
         ASMJIT_PROPAGATE(emitter->emit(insts.pairInstId, regs[0], regs[1], mem));
 
-      mem.resetToFixedOffset();
+      mem.resetOffsetMode();
 
       if (i == 0 && frame.hasPreservedFP()) {
         ASMJIT_PROPAGATE(emitter->mov(x29, sp));
@@ -420,7 +427,7 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitEpilog(const FuncFrame& frame) {
       else
         ASMJIT_PROPAGATE(emitter->emit(insts.pairInstId, regs[0], regs[1], mem));
 
-      mem.resetToFixedOffset();
+      mem.resetOffsetMode();
     }
   }
 
@@ -429,6 +436,35 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitEpilog(const FuncFrame& frame) {
   return kErrorOk;
 }
 
+static Error ASMJIT_CDECL Emitter_emitProlog(BaseEmitter* emitter, const FuncFrame& frame) {
+  EmitHelper emitHelper(emitter);
+  return emitHelper.emitProlog(frame);
+}
+
+static Error ASMJIT_CDECL Emitter_emitEpilog(BaseEmitter* emitter, const FuncFrame& frame) {
+  EmitHelper emitHelper(emitter);
+  return emitHelper.emitEpilog(frame);
+}
+
+static Error ASMJIT_CDECL Emitter_emitArgsAssignment(BaseEmitter* emitter, const FuncFrame& frame, const FuncArgsAssignment& args) {
+  EmitHelper emitHelper(emitter);
+  return emitHelper.emitArgsAssignment(frame, args);
+}
+
+void assignEmitterFuncs(BaseEmitter* emitter) {
+  emitter->_funcs.emitProlog = Emitter_emitProlog;
+  emitter->_funcs.emitEpilog = Emitter_emitEpilog;
+  emitter->_funcs.emitArgsAssignment = Emitter_emitArgsAssignment;
+
+#ifndef ASMJIT_NO_LOGGING
+  emitter->_funcs.formatInstruction = FormatterInternal::formatInstruction;
+#endif
+
+#ifndef ASMJIT_NO_VALIDATION
+  emitter->_funcs.validate = InstInternal::validate;
+#endif
+}
+
 ASMJIT_END_SUB_NAMESPACE
 
-#endif // !ASMJIT_NO_ARM
+#endif // !ASMJIT_NO_AARCH64

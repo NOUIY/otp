@@ -2,7 +2,7 @@ dnl Process this file with autoconf to produce a configure script. -*-Autoconf-*
 dnl
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 2018-2021. All Rights Reserved.
+dnl Copyright Ericsson AB 2018-2024. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -24,17 +24,24 @@ dnl define([AC_CACHE_SAVE], )dnl
 
 AC_INIT
 AC_CONFIG_SRCDIR([vsn.mk])
-AC_PREREQ([2.71])
+AC_PREREQ([2.72])
 
 m4_include([otp.m4])
 
 AC_CONFIG_AUX_DIR([${ERL_TOP}/make/autoconf])
+
+ERL_PUSH_WERROR
 
 ERL_CANONICAL_SYSTEM_TYPE
 
 AC_LANG(C)
 
 LM_PRECIOUS_VARS
+
+## Delete previous failed configure results
+if test -f ./CONF_INFO; then
+   rm ./CONF_INFO
+fi
 
 if test "$cross_compiling" = "yes"; then
     CROSS_COMPILING=yes
@@ -169,13 +176,13 @@ AS_HELP_STRING([--disable-evp-hmac],
     *)    DISABLE_EVP_HMAC=0;;
   esac ], DISABLE_EVP_HMAC=0)
 
-AC_ARG_ENABLE(deprecated_warnings,
-AS_HELP_STRING([--disable-deprecated-warnings],
-	       [disable warnings for deprecated functions in cryptolib (default is to warn, except for OpenSSL 3.x where the default is not to warn)]),
+AC_ARG_ENABLE(otp-test-engine,
+AS_HELP_STRING([--disable-otp-test-engine],
+       [Disable build of the otp_test_engine. (default is --enable-otp-test-engine, unless for LibreSSL >= 3.5.0 where default is --disable-otp-test-engine)]),
 [ case "$enableval" in
-    no)   deprecated_warnings=no;;
-    *)    deprecated_warnings=yes;;
-  esac ], deprecated_warnings=default_yes)
+    no)   DISABLE_OTP_TEST_ENGINE=yes;;
+    *)    DISABLE_OTP_TEST_ENGINE=no;;
+  esac ], DISABLE_OTP_TEST_ENGINE=default)
 
 AC_DEFUN([ERL_LINK_CRYPTO_IFELSE], [
     test_cflags=$1
@@ -249,6 +256,20 @@ yes
 		 ],
 		 [v3_include=yes],
 		 [v3_include=no])
+
+
+    if test "x$DISABLE_OTP_TEST_ENGINE" = "xdefault"; then
+# Get default value for the --disable-otp-test-engine. Depends on cryptolib version
+          AC_EGREP_CPP(^yes.?$,[
+#include <openssl/opensslv.h>
+#if LIBRESSL_VERSION_NUMBER >= 0x3050000fL
+yes
+#endif
+        		 ],
+	                 [DISABLE_OTP_TEST_ENGINE=yes],
+                         [DISABLE_OTP_TEST_ENGINE=no])
+    fi
+
     CPPFLAGS="$save_CPPFLAGS"
 
     AS_IF([test $valid_include != yes],
@@ -267,6 +288,13 @@ yes
           [test "$host_os" = "win32"],
           [
               # Windows...
+              AS_IF([test "x$ac_cv_sizeof_void_p" = "x8"],
+                    [
+                        lib_bits=64
+                    ],
+                    [
+                        lib_bits=32
+                    ])
               AS_IF([test -f "$dir/lib/VC/static/libcrypto${lib_bits}MD.lib"],
                     [
                         static_crypto_lib_name=libcrypto${lib_bits}MD
@@ -464,11 +492,9 @@ AS_CASE(["$erl_xcomp_without_sysroot-$with_ssl"],
                       AS_IF([test "x$ac_cv_sizeof_void_p" = "x8"],
                             [
 	                        std_win_ssl_locations="/mnt/c/OpenSSL-Win64 /c/OpenSSL-Win64 /mnt/c/opt/local64/pgm/OpenSSL /opt/local64/pgm/OpenSSL /cygdrive/c/OpenSSL-Win64"
-	                        lib_bits=64
                             ],
                             [
                                 std_win_ssl_locations="/mnt/c/OpenSSL-Win32 /c/OpenSSL-Win32 /mnt/c/OpenSSL /c/OpenSSL /cygdrive/c/OpenSSL /opt/local/pgm/OpenSSL /opt/local32/pgm/OpenSSL /mnt/c/opt/local/pgm/OpenSSL /mnt/c/opt/local32/pgm/OpenSSL /cygdrive/c/OpenSSL-Win32"
-	                        lib_bits=32
                             ])
 	          ])
 
@@ -788,21 +814,15 @@ AS_CASE(["$with_ssl_rpath"],
                   ],
                   [test "$CRYPTO_APP" = ""],
                   [
-                      AS_IF([test "$with_ssl_rpath" = yes],
-                            [AC_MSG_ERROR([runtime library path requested by user, but could not be set since no crypto library was found])])
-                      AC_MSG_RESULT([])
+                      AC_MSG_ERROR([runtime library path requested by user, but could not be set since no crypto library was found])
                   ],
                   [test "$ded_ld_rflg" = ""],
                   [
-                      AS_IF([test "$with_ssl_rpath" = yes],
-                            [AC_MSG_ERROR([runtime library path requested by user, but cannot be set on this platform])])
-                      AC_MSG_RESULT([])
-                  ]
+                      AC_MSG_ERROR([runtime library path requested by user, but cannot be set on this platform])
+                  ],
                   [test "$SSL_DYNAMIC_ONLY" != "yes"],
                   [
-                      AS_IF([test "$with_ssl_rpath" = yes],
-                            [AC_MSG_WARN([runtime library path requested by user, but dynamic linking will not be used])],
-                            [AC_MSG_RESULT([])])
+                      AC_MSG_WARN([runtime library path requested by user, but dynamic linking will not be used])
                   ],
                   [
                       # Check that it links...
@@ -843,35 +863,24 @@ AS_IF([test "$enable_fips_support" = "yes"],
       [
           AS_IF([test "$CRYPTO_APP" = ""],
                 [AC_MSG_ERROR([FIPS support requested, but no crypto library found])])
-          saveCFLAGS="$CFLAGS"
-          saveLDFLAGS="$LDFLAGS"
-          saveLIBS="$LIBS"
-          CFLAGS="$DED_BASIC_CFLAGS $SSL_INCLUDE"
-          AS_IF([test $SSL_DYNAMIC_ONLY = yes],
-                [
-                    LDFLAGS="$DED_LDFLAGS_CONFTEST $ded_ld_rpath -L$SSL_LIBDIR"
-                    LIBS="$LIBS -l$SSL_CRYPTO_LIBNAME $SSL_EXTRA_LIBS"
-                ],
-                [
-                    LDFLAGS="$DED_LDFLAGS_CONFTEST"
-                    AS_IF([test "$host_os" = "win32"],
-                          [LIBS="$LIBS $SSL_LIBDIR/$SSL_CRYPTO_LIBNAME.lib $SSL_EXTRA_LIBS"],
-                          [LIBS="$LIBS $SSL_LIBDIR/lib$SSL_CRYPTO_LIBNAME.a $SSL_EXTRA_LIBS"])
-                ])
-          AC_CHECK_FUNC([FIPS_mode_set],
-                        [SSL_FLAGS="-DFIPS_SUPPORT"],
-                        [AC_MSG_ERROR([FIPS support requested, but cannot be enabled])])
-          CFLAGS="$saveCFLAGS"
-          LDFLAGS="$saveLDFLAGS"
-          LIBS="$saveLIBS"
+          # Insert check for FIPS support here
+          SSL_FLAGS="-DFIPS_SUPPORT"
       ])
 
-AS_IF([test "x$v3_include" = "xyes" && test "x$deprecated_warnings" = "xdefault_yes" && test "$CRYPTO_APP" != ""],
-      [deprecated_warnings=no
+AS_IF([test "x$v3_include" = "xyes"],
+      [
+       AS_IF([test "x$SSL_DYNAMIC_ONLY" = "xno" ],
+             [
+              echo "Static linking with OpenSSL 3.0 *MAY* require special configuring of the cryptolib." >> ./CONF_INFO
+              AC_MSG_WARN(******************************************************************)
+              AC_MSG_WARN(* Static linking *MAY* require re-configuring the 3.0 cryptolib. *)
+              AC_MSG_WARN(******************************************************************)
+             ])
       ])
 
-AS_IF([test "x$deprecated_warnings" = "xno"  &&  test "$CRYPTO_APP" != ""],
-      [SSL_FLAGS="$SSL_FLAGS -Wno-deprecated-declarations"
+CRYPTO_NO_DEPRECATE_WARN=
+AS_IF([test "x$v3_include" = "xyes" && test "$CRYPTO_APP" != ""],
+      [CRYPTO_NO_DEPRECATE_WARN="-Wno-deprecated-declarations"
       ])
 
 saveCFLAGS="$CFLAGS"
@@ -915,6 +924,8 @@ CFLAGS="$saveCFLAGS"
 LDFLAGS="$saveLDFLAGS"
 LIBS="$saveLIBS"
 
+ERL_PUSH_WERROR
+
 AC_SUBST(SSL_INCLUDE)
 AC_SUBST(SSL_INCDIR)
 AC_SUBST(SSL_LIBDIR)
@@ -926,6 +937,8 @@ AC_SUBST(SSL_DED_LD_RUNTIME_LIBRARY_PATH)
 AC_SUBST(SSL_DYNAMIC_ONLY)
 AC_SUBST(DISABLE_EVP_DH)
 AC_SUBST(DISABLE_EVP_HMAC)
+AC_SUBST(DISABLE_OTP_TEST_ENGINE)
+AC_SUBST(CRYPTO_NO_DEPRECATE_WARN)
 
 AC_CONFIG_FILES([c_src/$host/Makefile:c_src/Makefile.in])
 AC_OUTPUT

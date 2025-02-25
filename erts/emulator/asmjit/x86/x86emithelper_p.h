@@ -19,7 +19,7 @@ ASMJIT_BEGIN_SUB_NAMESPACE(x86)
 //! \addtogroup asmjit_x86
 //! \{
 
-static inline RegType vecTypeIdToRegType(TypeId typeId) noexcept {
+static ASMJIT_INLINE_NODEBUG RegType vecTypeIdToRegType(TypeId typeId) noexcept {
   return uint32_t(typeId) <= uint32_t(TypeId::_kVec128End) ? RegType::kX86_Xmm :
          uint32_t(typeId) <= uint32_t(TypeId::_kVec256End) ? RegType::kX86_Ymm : RegType::kX86_Zmm;
 }
@@ -29,7 +29,7 @@ public:
   bool _avxEnabled;
   bool _avx512Enabled;
 
-  inline explicit EmitHelper(BaseEmitter* emitter = nullptr, bool avxEnabled = false, bool avx512Enabled = false) noexcept
+  ASMJIT_INLINE_NODEBUG explicit EmitHelper(BaseEmitter* emitter = nullptr, bool avxEnabled = false, bool avx512Enabled = false) noexcept
     : BaseEmitHelper(emitter),
       _avxEnabled(avxEnabled || avx512Enabled),
       _avx512Enabled(avx512Enabled) {}
@@ -49,6 +49,8 @@ public:
   Error emitProlog(const FuncFrame& frame);
   Error emitEpilog(const FuncFrame& frame);
 };
+
+void assignEmitterFuncs(BaseEmitter* emitter);
 
 //! \}
 //! \endcond

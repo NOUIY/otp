@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2000-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -710,7 +710,7 @@ file_info_basic_file(Config) when is_list(Config) ->
     %% Create a short file.
     Name = filename:join(RootDir,
 			 atom_to_list(?MODULE)
-			 ++"_basic_test"".fil"),
+			 ++"_basic_test.fil"),
     {ok,Fd1} = ?PRIM_FILE:open(Name, [write]),
     ?PRIM_FILE:write(Fd1, "foo bar"),
     ok = ?PRIM_FILE:close(Fd1),
@@ -1763,12 +1763,12 @@ list_dir_1(TestDir, Cnt, Sorted0) ->
 %%%
 
 run_large_file_test(Config, Run, Name) ->
-    case {os:type(),os:version()} of
-	{{win32,nt},_} ->
+    case {erlang:system_info(wordsize),os:type(),os:version()} of
+	{8,{win32,nt},_} ->
 	    do_run_large_file_test(Config, Run, Name);
-	{{unix,sunos},OsVersion} when OsVersion < {5,5,1} ->
+	{8,{unix,sunos},OsVersion} when OsVersion < {5,5,1} ->
 	    {skip,"Only supported on Win32, Unix or SunOS >= 5.5.1"};
-	{{unix,_},_} ->
+	{8,{unix,_},_} ->
 	    DiscFree = unix_free(proplists:get_value(priv_dir, Config)),
             MemFree = free_memory(),
 	    io:format("Free disk: ~w KByte~n", [DiscFree]),

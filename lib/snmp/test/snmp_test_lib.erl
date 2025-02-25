@@ -1,7 +1,7 @@
 %% 
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2002-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@
 
 -export([tc_try/2, tc_try/3,
          tc_try/4, tc_try/5]).
--export([proxy_call/3]).
--export([hostname/0, hostname/1, localhost/0, localhost/1, os_type/0, sz/1,
+-export([proxy_call/3, proxy_call/4]).
+-export([hostname/0, hostname/1, localhost/0, localhost/1, sz/1,
 	 display_suite_info/1]).
 -export([non_pc_tc_maybe_skip/4,
          os_based_skip/1,
@@ -41,8 +41,7 @@
 -export([hours/1, minutes/1, seconds/1, sleep/1]).
 -export([flush_mqueue/0, mqueue/0, mqueue/1, trap_exit/0, trap_exit/1]).
 -export([ping/1, local_nodes/0, nodes_on/1]).
--export([start_node/2, stop_node/1]).
--export([is_app_running/1, 
+-export([is_app_running/1,
 	 is_crypto_running/0, is_mnesia_running/0, is_snmp_running/0,
          ensure_not_running/3]).
 -export([crypto_start/0, crypto_support/0]).
@@ -53,7 +52,10 @@
 -export([eprint/2, wprint/2, nprint/2, iprint/2]).
 -export([explicit_inet_backend/0, test_inet_backends/0]).
 -export([which_host_ip/2]).
+-export([ftime/2]).
 
+%% Convenient exports...
+-export([analyze_and_print_host_info/0]).
 
 -define(SKIP(R), skip(R, ?MODULE, ?LINE)).
 
@@ -277,39 +279,107 @@ explicit_inet_backend() ->
             false
     end.
 
+%% We cannot use application:get_all_env(snmp) since that only "works"
+%% when the application has been started and this function may be called
+%% well before that happens.
 test_inet_backends() ->
     case init:get_argument(snmp) of
-        {ok, SnmpArgs} when is_list(SnmpArgs) ->
-            test_inet_backends(SnmpArgs, atom_to_list(?FUNCTION_NAME));
-        error ->
+        {ok, Args} when is_list(Args) ->
+            test_inet_backends(Args);
+        _ ->
             false
     end.
 
-test_inet_backends([], _) ->
+test_inet_backends([]) ->
     false;
-test_inet_backends([[Key, Val] | _], Key) ->
-    case list_to_atom(string:to_lower(Val)) of
-        Bool when is_boolean(Bool) ->
-            Bool;
-        _ ->
-            false
-    end;
-test_inet_backends([_|Args], Key) ->
-    test_inet_backends(Args, Key).
+test_inet_backends([["test_inet_backends","true"]|_]) ->
+    true;
+test_inet_backends([_|Args]) ->
+    test_inet_backends(Args).
+           
 
+proxy_call(F, Timeout, Default) ->
+    proxy_call(F, Timeout, infinity, Default).
 
+proxy_call(F, Timeout, PollTimeout, Default)
+  when is_function(F, 0) andalso
+       is_integer(Timeout) andalso (Timeout > 0) andalso
+       ((PollTimeout =:= infinity) orelse
+        (is_integer(PollTimeout) andalso (PollTimeout > 0))) ->
+    PollTimer = poll_timer_start(Timeout, PollTimeout),
+    iprint("[proxy-init] create proxy", []),
+    {P, M}    = erlang:spawn_monitor(fun() -> exit(F()) end),
+    pc_loop(P, M, Timeout, PollTimer, Default).
 
-proxy_call(F, Timeout, Default)
-  when is_function(F, 0) andalso is_integer(Timeout) andalso (Timeout > 0) ->
-    {P, M} = erlang:spawn_monitor(fun() -> exit(F()) end),
+pc_loop(P, M, Timeout, PollTimer, Default) ->
+    T0 = t(),
     receive
         {'DOWN', M, process, P, Reply} ->
-            Reply
+            iprint("[proxy-loop] received result: "
+                   "~n   ~p", [Reply]),
+            Reply;
+        {?MODULE, poll, PollTimeout} ->
+            iprint("[proxy-loop] Poll proxy: "
+                   "~n   Current Function:   ~p"
+                   "~n   Current Stacktrace: ~p"
+                   "~n   Reductions:         ~p"
+                   "~n   Memory:             ~p"
+                   "~n   Heap Size:          ~p"
+                   "~n   Max Heap Size:      ~p"
+                   "~n   Total Heap Size:    ~p"
+                   "~n   Status:             ~p",
+                   [pi(P, current_function),
+                    pi(P, current_stacktrace),
+                    pi(P, reductions),
+                    pi(P, memory),
+                    pi(P, heap_size),
+                    pi(P, max_heap_size),
+                    pi(P, total_heap_size),
+                    pi(P, status)]),
+            Timeout2   = t(T0, Timeout),
+            PollTimer2 = poll_timer_start(Timeout2, PollTimeout),
+            pc_loop(P, M, Timeout2, PollTimer2, Default)
+
     after Timeout ->
+            wprint("[proxy-loop] timeout: "
+                   "~n   Current Function:   ~p"
+                   "~n   Current Stacktrace: ~p"
+                   "~n   Reductions:         ~p"
+                   "~n   Memory:             ~p"
+                   "~n   Heap Size:          ~p"
+                   "~n   Max Heap Size:      ~p"
+                   "~n   Total Heap Size:    ~p"
+                   "~n   Status:             ~p",
+                   [pi(P, current_function),
+                    pi(P, current_stacktrace),
+                    pi(P, reductions),
+                    pi(P, memory),
+                    pi(P, heap_size),
+                    pi(P, max_heap_size),
+                    pi(P, total_heap_size),
+                    pi(P, status)]),
+            poll_timer_stop(PollTimer),
             erlang:demonitor(M, [flush]),
             exit(P, kill),
             Default
     end.
+
+poll_timer_start(_Timeout, PollTimeout)
+  when (PollTimeout =:= infinity) ->
+    undefined;
+poll_timer_start(Timeout, PollTimeout)
+  when (Timeout > PollTimeout) ->
+    erlang:send_after(PollTimeout, self(), {?MODULE, poll, PollTimeout});
+poll_timer_start(_, _) ->
+    undefined.
+
+poll_timer_stop(TRef) when is_reference(TRef) ->
+    erlang:cancel_timer(TRef);
+poll_timer_stop(_) ->
+    ok.
+
+t(T0, T)  -> T - (t() - T0).
+t()       -> snmp_misc:now(ms).
 
 
 hostname() ->
@@ -396,10 +466,10 @@ which_addr(Family, [{_Name, IfOpts} | IfList]) ->
 which_addr2(_Family, []) ->
     {error, not_found};
 which_addr2(Family, [{addr, Addr}|_]) 
-  when (Family =:= inet) andalso (size(Addr) =:= 4) ->
+  when (Family =:= inet) andalso (tuple_size(Addr) =:= 4) ->
     {ok, Addr};
 which_addr2(Family, [{addr, Addr}|_]) 
-  when (Family =:= inet6) andalso (size(Addr) =:= 8) ->
+  when (Family =:= inet6) andalso (tuple_size(Addr) =:= 8) ->
     {ok, Addr};
 which_addr2(Family, [_|IfOpts]) ->
     which_addr2(Family, IfOpts).
@@ -408,19 +478,9 @@ which_addr2(Family, [_|IfOpts]) ->
 sz(L) when is_list(L) ->
     length(L);
 sz(B) when is_binary(B) ->
-    size(B);
+    byte_size(B);
 sz(O) ->
     {unknown_size,O}.
-
-
-os_type() ->
-    case (catch test_server:os_type()) of
-	{'EXIT', _} ->
-	    %% Pre-R10 test server does not have this function
-	    os:type();
-	OsType ->
-	    OsType
-    end.
 
 display_suite_info(SUITE) when is_atom(SUITE) ->
     (catch do_display_suite_info(SUITE)).
@@ -468,6 +528,26 @@ display_app_version(MI) ->
 %% ----------------------------------------------------------------
 %% Conditional skip of testcases
 %%
+
+%% maybe_skip([]) ->
+%%     ok;
+%% maybe_skip([{Desc, F}|Funs]) when is_function(F, 0) ->
+%%     iprint("Check skip condition: ~s", [Desc]),
+%%     try F() of
+%%         {skip, _} = SKIP ->
+%%             iprint("Skip condition fulfilled: SKIP", [Desc]),
+%%             SKIP;
+%%         _ ->
+%%             maybe_skip(Funs)
+%%     catch
+%%         C:E:S ->
+%%             iprint("Skip condition failed - ignoring"
+%%                    "~n      Class: ~p"
+%%                    "~n      Error: ~p"
+%%                    "~n      Stack: ~p", [C, E, S]),
+%%             maybe_skip(Funs)
+%%     end.
+
 
 non_pc_tc_maybe_skip(Config, Condition, File, Line)
   when is_list(Config) andalso is_function(Condition) ->
@@ -573,26 +653,50 @@ has_support_ipv6() ->
             %% so for windows we need to use the old style...
             old_has_support_ipv6();
         _ ->
-            socket:is_supported(ipv6) andalso has_valid_ipv6_address()
+            %% Socket can *also* be configured out, so we need to catch...
+            try socket:is_supported(ipv6) of
+                true ->
+                    has_valid_ipv6_address();
+                false ->
+                    false
+            catch
+                _:_:_ ->
+                    old_has_support_ipv6()
+            end
     end.
 
 has_valid_ipv6_address() ->
     case net:getifaddrs(fun(#{addr  := #{family := inet6},
                               flags := Flags}) ->
-                                not lists:member(loopback, Flags);
+                                lists:member(up, Flags) andalso
+                                    lists:member(running, Flags) andalso
+                                    not lists:member(loopback, Flags);
                            (_) ->
                                 false
                         end) of
         {ok, [#{addr := #{addr := LocalAddr}}|_]} ->
             %% At least one valid address, we pick the first...
+            iprint("~w -> try validate address: "
+                   "~n   ~p", [?FUNCTION_NAME, LocalAddr]),
             try validate_ipv6_address(LocalAddr)
             catch
-                _:_:_ ->
+                exit:{skip, SkipReasonStr} when is_list(SkipReasonStr) ->
+                    nprint("~w -> failed validating address: "
+                           "~n   ~s", [?FUNCTION_NAME, SkipReasonStr]),
+                    false;
+                C:E ->
+                    nprint("~w -> failed validating address: "
+                           "~n   Error Class: ~p"
+                           "~n   Error:       ~p", [?FUNCTION_NAME, C, E]),
                     false
             end;
-        {ok, _} ->
+        {ok, X} ->
+            nprint("~w -> invalid ok: "
+                   "~n   ~p", [?FUNCTION_NAME, X]),
             false;
-        {error, _} ->
+        {error, X} ->
+            wprint("~w -> error: "
+                   "~n   ~p", [?FUNCTION_NAME, X]),
             false
     end.
 
@@ -663,7 +767,7 @@ old_has_support_ipv6() ->
 
 old_has_support_ipv6(Hostname) ->
     case inet:getaddr(Hostname, inet6) of
-        {ok, Addr} when (size(Addr) =:= 8) andalso
+        {ok, Addr} when (tuple_size(Addr) =:= 8) andalso
                         (element(1, Addr) =/= 0) andalso
                         (element(1, Addr) =/= 16#fe80) ->
             true;
@@ -710,7 +814,12 @@ init_per_suite(Config) ->
                     {skip, "Unstable host and/or os (or combo thererof)"};
                 false ->
                     snmp_test_global_sys_monitor:start(),
-                    [{snmp_factor, Factor} | Config]
+                    case lists:keysearch(label, 1, HostInfo) of
+                        {value, Label} ->
+                            [{snmp_factor, Factor}, Label | Config];
+                        false ->
+                            [{snmp_factor, Factor} | Config]
+                    end
             catch
                 throw:{skip, _} = SKIP ->
                     SKIP
@@ -772,7 +881,7 @@ maybe_skip(_HostInfo) ->
         end,
     DarwinVersionVerify =
         fun(V) when (V > {9, 8, 0}) ->
-                %% This version is OK: No Skip
+                %% These version(s) are OK: No Skip
                 false;
            (_V) ->
                 %% This version is *not* ok: Skip
@@ -970,106 +1079,576 @@ analyze_and_print_host_info() ->
             analyze_and_print_win_host_info(Version);
         _ ->
             io:format("OS Family: ~p"
-                      "~n   OS Type:               ~p"
-                      "~n   Version:               ~p"
-                      "~n   Num Online Schedulers: ~s"
-                      "~n", [OsFam, OsName, Version, str_num_schedulers()]),
+                      "~n   OS Type:                 ~p"
+                      "~n   Version:                 ~p"
+                      "~n   Num Online Schedulers:   ~s"
+                      "~n   TS Extra Platform Label: ~s"
+                      "~n", [OsFam, OsName, Version, str_num_schedulers(),
+                             ts_extra_platform_label()]),
             {num_schedulers_to_factor(), []}
     end.
 
+ts_extra_platform_label() ->
+    case os:getenv("TS_EXTRA_PLATFORM_LABEL") of
+        false -> "-";
+        Val   -> Val
+    end.
+
+ts_scale_factor() ->
+    case timetrap_scale_factor() of
+        N when is_integer(N) andalso (N > 0) ->
+            N - 1;
+        _ ->
+            0
+    end.
+
 linux_which_distro(Version) ->
+    Label = ts_extra_platform_label(),
+    Checks =
+        [fun() -> do_linux_which_distro_os_release(Version,     Label) end,
+         fun() -> do_linux_which_distro_suse_release(Version,   Label) end,
+         fun() -> do_linux_which_distro_fedora_release(Version, Label) end,
+         fun() -> do_linux_which_distro_issue(Version,          Label) end],
+    try linux_which_distro("", Version, Label, Checks)
+    catch
+        throw:{distro, Distro} ->
+            Distro
+    end.
+
+linux_which_distro("", Version, Label, []) ->
+    io:format("Linux: ~s"
+              "~n   TS Extra Platform Label: ~s"
+              "~n   Product Name:            ~s"
+              "~n", [Version, Label,
+                     linux_product_name()]),    
+    {other, simplify_label(Label)};
+linux_which_distro(DestroStr, Version, Label, []) ->
+    io:format("Linux: ~s"
+              "~n   Distro:                  ~s"
+              "~n   TS Extra Platform Label: ~s"
+              "~n   Product Name:            ~s"
+              "~n", [Version, DestroStr, Label,
+                     linux_product_name()]),    
+    {other, simplify_label(Label)};
+linux_which_distro(Default, Version, Label, [Check|Checks]) ->
+    try Check() of
+        DistroStr when is_list(DistroStr) ->
+            linux_which_distro(DistroStr, Version, Label, Checks);
+        retry ->
+            linux_which_distro(Default, Version, Label, Checks);
+        {error, _Reason} ->
+            linux_which_distro(Default, Version, Label, Checks)
+    catch
+        throw:{error, _Reason} ->
+	    linux_which_distro(Default, Version, Label, Checks)
+    end.
+       
+do_linux_which_distro_os_release(Version, Label) ->
+    case file:read_file_info("/etc/os-release") of
+	{ok, _} ->
+            %% We want to 'catch' if our processing is wrong,
+            %% that's why we catch and re-throw the distro.
+            %% Actual errors will be returned as 'ignore'.
+            try
+                begin
+                    Info = linux_process_os_release(),
+                    {value, {_, DistroStr}} = lists:keysearch(name, 1, Info),
+                    {value, {_, VersionNo}} = lists:keysearch(version, 1, Info),
+                    %% SLabel = simplify_label(Label),
+                    %% io:format("Linux: ~s"
+                    %%           "~n   Distro:                  ~s"
+                    %%           "~n   Distro Version:          ~s"
+                    %%           "~n   TS Extra Platform Label: ~s (~p)"
+                    %%           "~n   Product Name:            ~s"
+                    %%           "~n",
+                    %%           [Version, DistroStr, VersionNo, Label, SLabel,
+                    %%            linux_product_name()]),
+                    SLabel = linux_distro_release(Version,
+                                                  DistroStr, VersionNo, Label),
+                    throw({distro,
+                           {linux_distro_str_to_distro_id(DistroStr),
+                            SLabel}})
+                end
+            catch
+                throw:{distro, _} = DISTRO ->
+                    throw(DISTRO);
+                _:_ ->
+                    retry
+            end;
+        _ ->
+            retry
+    end.
+
+
+linux_distro_release(Version, Distro, Label) ->
+    SLabel = simplify_label(Label),
+    io:format("Linux: ~s"
+              "~n   Distro:                  ~s"
+              "~n   TS Extra Platform Label: ~s (~p)"
+              "~n   Product Name:            ~s"
+              "~n",
+              [Version, Distro, Label, SLabel, linux_product_name()]),
+    SLabel.
+
+linux_distro_release(Version, Distro, DVersion, Label) ->
+    SLabel = simplify_label(Label),
+    io:format("Linux: ~s"
+              "~n   Distro:                  ~s"
+              "~n   Distro Version:          ~s"
+              "~n   TS Extra Platform Label: ~s (~p)"
+              "~n   Product Name:            ~s"
+              "~n",
+              [Version, Distro, DVersion, Label, SLabel, linux_product_name()]),
+    SLabel.
+
+
+linux_process_os_release() ->
+    %% Read the "raw" file
+    Raw = os:cmd("cat /etc/os-release"),
+    %% Split it into lines
+    Lines1 = string:tokens(Raw, [$\n]),
+    %% Just in case, skip any lines starting with '#'.
+    Lines2 = linux_process_os_release1(Lines1),
+    %% Each (remaining) line *should* be: <TAG>=<VALUE>
+    %% Both sides will be strings, the value side will be a quoted string...
+    %% Convert those into a 2-tuple list: [{Tag, Value}]
+    linux_process_os_release2(Lines2).
+
+linux_process_os_release1(Lines) ->
+    linux_process_os_release1(Lines, []).
+
+linux_process_os_release1([], Acc) ->
+    lists:reverse(Acc);
+linux_process_os_release1([H|T], Acc) ->
+    case H of
+        "#" ++ _ ->
+            linux_process_os_release1(T, Acc);
+        _ ->
+            linux_process_os_release1(T, [H|Acc])
+    end.
+
+linux_process_os_release2(Lines) ->
+    linux_process_os_release2(Lines, []).
+
+linux_process_os_release2([], Acc) ->
+    lists:reverse(Acc);
+linux_process_os_release2([H|T], Acc) ->
+    case linux_process_os_release3(H) of
+        {value, Value} ->
+            linux_process_os_release2(T, [Value|Acc]);
+        false ->
+            linux_process_os_release2(T, Acc)
+    end.
+
+linux_process_os_release3(H) ->
+    case [string:strip(S) || S <- string:tokens(H, [$=])] of
+        [Tag, Value] ->
+            Tag2   = list_to_atom(string:to_lower(Tag)),
+            Value2 = string:strip(Value, both, $"),
+            linux_process_os_release4(Tag2, Value2);
+        _ ->
+            false
+    end.
+
+linux_process_os_release4(name = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(version = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(version_id = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(id = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(pretty_name = Tag, Value) ->
+    {value, {Tag, Value}};
+linux_process_os_release4(_Tag, _Value) ->
+    false.
+
+
+linux_distro_str_to_distro_id("Debian" ++ _) ->
+    debian;
+linux_distro_str_to_distro_id("Fedora" ++ _) ->
+    fedora;
+linux_distro_str_to_distro_id("Linux Mint" ++ _) ->
+    linux_mint;
+linux_distro_str_to_distro_id("MontaVista" ++ _) ->
+    montavista;
+linux_distro_str_to_distro_id("openSUSE" ++ _) ->
+    suse;
+linux_distro_str_to_distro_id("SLES" ++ _) ->
+    sles;
+linux_distro_str_to_distro_id("Ubuntu" ++ _) ->
+    ubuntu;
+linux_distro_str_to_distro_id("Wind River Linux" ++ _) ->
+    wind_river;
+linux_distro_str_to_distro_id("Yellow Dog" ++ _) ->
+    yellow_dog;
+linux_distro_str_to_distro_id(X) ->
+    X.
+
+
+do_linux_which_distro_fedora_release(Version, Label) ->
+    %% Check if fedora
+    case file:read_file_info("/etc/fedora-release") of
+        {ok, _} ->
+            SLabel =
+                case [string:trim(S) ||
+                         S <- string:tokens(os:cmd("cat /etc/fedora-release"),
+                                            [$\n])] of
+                    [DistroStr | _] ->
+                        %% io:format("Linux: ~s"
+                        %%           "~n   Distro:                  ~s"
+                        %%           "~n   TS Extra Platform Label: ~s (~p)"
+                        %%           "~n   Product Name:            ~s"
+                        %%           "~n",
+                        %%           [Version, DistroStr, Label, SLabel,
+                        %%            linux_product_name()]);
+                        linux_distro_release(Version, DistroStr, Label);
+                    _ ->
+                        %% io:format("Linux: ~s"
+                        %%           "~n   Distro: ~s"
+                        %%           "~n   TS Extra Platform Label: ~s (~p)"
+                        %%           "~n   Product Name:            ~s"
+                        %%           "~n",
+                        %%           [Version, "Fedora", Label, SLabel
+                        %%            linux_product_name()])
+                        linux_distro_release(Version, "Fedora", Label)
+            end,
+            throw({distro, {fedora, SLabel}});
+        _ ->
+            throw({error, not_found})
+    end.
+
+do_linux_which_distro_suse_release(Version, Label) ->
+    %% Check if its a SuSE
+    case file:read_file_info("/etc/SUSE-brand") of
+        {ok, _} ->
+            case file:read_file_info("/etc/SuSE-release") of
+                {ok, _} ->
+                    case [string:trim(S) ||
+                             S <- string:tokens(os:cmd("cat /etc/SuSE-release"),
+                                                [$\n])] of
+                        ["SUSE Linux Enterprise Server" ++ _ = DistroStr | _] ->
+                            %% io:format("Linux: ~s"
+                            %%           "~n   Distro:                  ~s"
+                            %%           "~n   TS Extra Platform Label: ~s (~p)"
+                            %%           "~n   Product Name:            ~s"
+                            %%           "~n",
+                            %%           [Version, DistroStr, Label, SLabel,
+                            %%            linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr,
+                                                          Label),
+                            throw({distro, {sles, SLabel}});
+                        [DistroStr | _] ->
+                            %% io:format("Linux: ~s"
+                            %%           "~n   Distro:                  ~s"
+                            %%           "~n   TS Extra Platform Label: ~s (~p)"
+                            %%           "~n   Product Name:            ~s"
+                            %%           "~n",
+                            %%           [Version, DistroStr, Label, SLabel,
+                            %%            linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr,
+                                                          Label),
+                            throw({distro, {suse, SLabel}});
+                        _ ->
+                            %% io:format("Linux: ~s"
+                            %%           "~n   Distro:                  ~s"
+                            %%           "~n   TS Extra Platform Label: ~s (~p)"
+                            %%           "~n   Product Name:            ~s"
+                            %%           "~n",
+                            %%           [Version, "SuSE", Label, SLabel,
+                            %%            linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          "SuSE",
+                                                          Label),
+                            throw({distro, {suse, SLabel}})
+                    end;
+                _ ->
+                    case string:tokens(os:cmd("cat /etc/SUSE-brand"), [$\n]) of
+                        ["SLE" = DistroStr, VERSION | _] ->
+                            case [string:strip(S) ||
+                                     S <- string:tokens(VERSION, [$=])] of
+                                ["VERSION", VersionNo] ->
+                                    %% io:format(
+                                    %%   "Linux: ~s"
+                                    %%   "~n   Distro:                  ~s"
+                                    %%   "~n   Distro Version:          ~s"
+                                    %%   "~n   TS Extra Platform Label: ~s (~p)"
+                                    %%   "~n   Product Name:            ~s"
+                                    %%   "~n",
+                                    %%   [Version,
+                                    %%    DistroStr, VersionNo,
+                                    %%    Label, SLabel,
+                                    %%    linux_product_name()]),
+                                    SLabel = linux_distro_release(Version,
+                                                                  DistroStr,
+                                                                  VersionNo,
+                                                                  Label),
+                                    throw({distro, {sles, SLabel}});
+                                _ ->
+                                    %% io:format(
+                                    %%   "Linux: ~s"
+                                    %%   "~n   Distro:                  ~s"
+                                    %%   "~n   TS Extra Platform Label: ~s (~p)"
+                                    %%   "~n   Product Name:            ~s"
+                                    %%   "~n",
+                                    %%   [Version, DistroStr, Label, SLabel,
+                                    %%    linux_product_name()]),
+                                    SLabel = linux_distro_release(Version,
+                                                                  DistroStr,
+                                                                  Label),
+                                    throw({distro, {sles, SLabel}})
+                            end;
+                        ["openSUSE" = DistroStr, VERSION | _] ->
+                            case [string:strip(S) ||
+                                     S <- string:tokens(VERSION, [$=])] of
+                                ["VERSION", VersionNo] ->
+                                    %% io:format(
+                                    %%   "Linux: ~s"
+                                    %%   "~n   Distro:                  ~s"
+                                    %%   "~n   Distro Version:          ~s"
+                                    %%   "~n   TS Extra Platform Label: ~s (~p)"
+                                    %%   "~n   Product Name:            ~s"
+                                    %%   "~n",
+                                    %%   [Version,
+                                    %%    DistroStr, VersionNo,
+                                    %%    Label, SLabel,
+                                    %%    linux_product_name()]),
+                                    SLabel = linux_distro_release(Version,
+                                                                  DistroStr,
+                                                                  VersionNo,
+                                                                  Label),
+                                    throw({distro, {suse, SLabel}});
+                                _ ->
+                                    %% io:format(
+                                    %%   "Linux: ~s"
+                                    %%   "~n   Distro:                  ~s"
+                                    %%   "~n   TS Extra Platform Label: ~s (~p)"
+                                    %%   "~n   Product Name:            ~s"
+                                    %%   "~n",
+                                    %%   [Version, DistroStr, Label, SLabel,
+                                    %%    linux_product_name()]),
+                                    SLabel = linux_distro_release(Version,
+                                                                  DistroStr,
+                                                                  Label),
+                                    throw({distro, {suse, SLabel}})
+                            end;
+                        _ ->
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, "Unknown SUSE",
+                            %%    Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          "Unknown SUSE",
+                                                          Label),
+                            throw({distro, {suse, SLabel}})
+                    end
+            end;
+        _ ->
+            throw({error, not_found})
+    end.
+
+
+do_linux_which_distro_issue(Version, Label) ->
     case file:read_file_info("/etc/issue") of
         {ok, _} ->
             case [string:trim(S) ||
                      S <- string:tokens(os:cmd("cat /etc/issue"), [$\n])] of
-                [DistroStr|_] ->
-                    io:format("Linux: ~s"
-                              "~n   ~s"
-                              "~n",
-                              [Version, DistroStr]),
+                [DistroStr | _] ->
                     case DistroStr of
                         "Wind River Linux" ++ _ ->
-                            wind_river;
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {wind_river, SLabel}});
                         "MontaVista" ++ _ ->
-                            montavista;
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {montavista, SLabel}});
                         "Yellow Dog" ++ _ ->
-                            yellow_dog;
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {yellow_dog, SLabel}});
+                        "Debian" ++ _ ->
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {debian, SLabel}});
+                        "Ubuntu" ++ _ ->
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {ubuntu, SLabel}});
+                        "Linux Mint" ++ _ ->
+                            %% io:format(
+                            %%   "Linux: ~s"
+                            %%   "~n   Distro:                  ~s"
+                            %%   "~n   TS Extra Platform Label: ~s (~p)"
+                            %%   "~n   Product Name:            ~s"
+                            %%   "~n",
+                            %%   [Version, DistroStr, Label, SLabel,
+                            %%    linux_product_name()]),
+                            SLabel = linux_distro_release(Version,
+                                                          DistroStr, Label),
+                            throw({distro, {linux_mint, SLabel}});
                         _ ->
-                            other
+                            DistroStr
                     end;
                 X ->
-                    io:format("Linux: ~s"
-                              "~n   ~p"
-                              "~n",
-                              [Version, X]),
-                    other
+                    X
             end;
         _ ->
-            io:format("Linux: ~s"
-                      "~n", [Version]),
-            other
+            throw({error, not_found})
     end.
-    
+
+
+simplify_label("Systemtap" ++ _) ->
+    {host, systemtap};
+simplify_label("Meamax" ++ _) ->
+    {host, meamax};
+simplify_label("Cover" ++ _) ->
+    {host, cover};
+simplify_label(Label) ->
+    case string:find(string:to_lower(Label), "docker") of
+        "docker" ++ _ ->
+            docker;
+        _ ->
+            {host, undefined}
+    end.
+
+label2factor(docker) ->
+    4;
+label2factor({host, meamax}) ->
+    2;
+label2factor({host, cover}) ->
+    6;
+label2factor({host, _}) ->
+    0.
+
+
 analyze_and_print_linux_host_info(Version) ->
-    Distro =
-        case file:read_file_info("/etc/issue") of
-            {ok, _} ->
-                linux_which_distro(Version);
-            _ ->
-                io:format("Linux: ~s"
-                          "~n", [Version]),
-                other
-        end,
+    {Distro, Label} = linux_which_distro(Version),
+    %% 'VirtFactor' will be 0 unless virtual
+    VirtFactor = linux_virt_factor(),
     Factor =
         case (catch linux_which_cpuinfo(Distro)) of
             {ok, {CPU, BogoMIPS}} ->
                 io:format("CPU: "
-                          "~n   Model:                 ~s"
-                          "~n   BogoMIPS:              ~w"
-                          "~n   Num Online Schedulers: ~s"
+                          "~n   Model:                   ~s"
+                          "~n   BogoMIPS:                ~w"
+                          "~n   Num Online Schedulers:   ~s"
                           "~n", [CPU, BogoMIPS, str_num_schedulers()]),
                 if
-                    (BogoMIPS > 20000) ->
+                    (BogoMIPS > 50000) ->
                         1;
-                    (BogoMIPS > 10000) ->
+                    (BogoMIPS > 40000) ->
                         2;
-                    (BogoMIPS > 5000) ->
+                    (BogoMIPS > 30000) ->
                         3;
-                    (BogoMIPS > 2000) ->
+                    (BogoMIPS > 20000) ->
+                        4;
+                    (BogoMIPS > 10000) ->
                         5;
-                    (BogoMIPS > 1000) ->
+                    (BogoMIPS > 5000) ->
                         8;
+                    (BogoMIPS > 3000) ->
+                        12;
                     true ->
                         10
                 end;
+            {ok, "POWER9" ++ _ = CPU} ->
+                %% For some reason this host is really slow
+                %% Consider the CPU, it really should not be...
+                %% But, to not fail a bunch of test cases, we add 5
+                case linux_cpuinfo_clock() of
+                    Clock when is_integer(Clock) andalso (Clock > 0) ->
+                        io:format("CPU: "
+                                  "~n   Model:                 ~s"
+                                  "~n   CPU Speed:             ~w"
+                                  "~n   Num Online Schedulers: ~s"
+                                  "~n", [CPU, Clock, str_num_schedulers()]),
+                        if
+                            (Clock > 2000) ->
+                                5 + num_schedulers_to_factor();
+                            true ->
+                                10 + num_schedulers_to_factor()
+                        end;
+                    _ ->
+                        num_schedulers_to_factor()
+                end;
             {ok, CPU} ->
                 io:format("CPU: "
-                          "~n   Model:                 ~s"
-                          "~n   Num Online Schedulers: ~s"
+                          "~n   Model:                   ~s"
+                          "~n   Num Online Schedulers:   ~s"
                           "~n", [CPU, str_num_schedulers()]),
-                NumChed = erlang:system_info(schedulers),
-                if
-                    (NumChed > 2) ->
-                        2;
-                    true ->
-                        5
-                end;
+                num_schedulers_to_factor();
             _ ->
                 5
         end,
+    AddLabelFactor = label2factor(Label),
     %% Check if we need to adjust the factor because of the memory
-    try linux_which_meminfo() of
-        AddFactor ->
-            io:format("TS Scale Factor: ~w (~w + ~w)~n",
-                      [timetrap_scale_factor(), Factor, AddFactor]),
-            {Factor + AddFactor, []}
-    catch
-        _:_:_ ->
-            io:format("TS Scale Factor: ~w (~w)~n",
-                      [timetrap_scale_factor(), Factor]),
-            {Factor, []}
-    end.
-
+    AddMemFactor = try linux_which_meminfo()
+                   catch _:_:_ -> 0
+                   end,
+    TSScaleFactor = case timetrap_scale_factor() of
+                        N when is_integer(N) andalso (N > 0) ->
+                            N - 1;
+                        _ ->
+                            0
+                    end,
+    io:format("Factor calc:"
+              "~n      Base Factor:     ~w"
+              "~n      Label Factor:    ~w"
+              "~n      Mem Factor:      ~w"
+              "~n      Virtual Factor:  ~w"
+              "~n      TS Scale Factor: ~w"
+              "~n", [Factor, AddLabelFactor, AddMemFactor, VirtFactor,
+                     TSScaleFactor]),
+    {Factor + AddLabelFactor + AddMemFactor + VirtFactor + TSScaleFactor,
+     [{label, Label}]}.
 
 
 linux_cpuinfo_lookup(Key) when is_list(Key) ->
@@ -1092,19 +1671,17 @@ linux_cpuinfo_motherboard() ->
     end.
 
 linux_cpuinfo_bogomips() ->
-    case linux_cpuinfo_lookup("bogomips") of
-        BMips when is_list(BMips) ->
-            try lists:sum([bogomips_to_int(BM) || BM <- BMips])
-            catch
-                _:_:_ ->
-                    "-"
-            end;
-        _ ->
-            "-"
+    case linux_cpuinfo_bogomips("bogomips") of
+        "-" ->
+            linux_cpuinfo_bogomips("BogoMIPS");
+        Res ->
+            Res
     end.
 
-linux_cpuinfo_BogoMIPS() ->
-    case linux_cpuinfo_lookup("BogoMIPS") of
+linux_cpuinfo_bogomips(Key) ->
+    case linux_cpuinfo_lookup(Key) of
+        [] ->
+            "-";
         BMips when is_list(BMips) ->
             try lists:sum([bogomips_to_int(BM) || BM <- BMips])
             catch
@@ -1142,19 +1719,19 @@ bogomips_to_int(BM) ->
             end
     end.
 
-linux_cpuinfo_model() ->
-    case linux_cpuinfo_lookup("model") of
-        [M|_] ->
-            M;
-        _X ->
-            "-"
-    end.
-
 linux_cpuinfo_platform() ->
     case linux_cpuinfo_lookup("platform") of
         [P] ->
             P;
         _ ->
+            "-"
+    end.
+
+linux_cpuinfo_model() ->
+    case linux_cpuinfo_lookup("model") of
+        [M|_] ->
+            M;
+        _X ->
             "-"
     end.
 
@@ -1233,7 +1810,7 @@ linux_which_cpuinfo(wind_river) ->
         end,
     case linux_cpuinfo_total_bogomips() of
         "-" ->
-            case linux_cpuinfo_BogoMIPS() of
+            case linux_cpuinfo_bogomips() of
                 "-" ->
                     {ok, CPU};
                 BMips ->
@@ -1244,19 +1821,43 @@ linux_which_cpuinfo(wind_river) ->
     end;
 
 %% Check for x86 (Intel or AMD)
-linux_which_cpuinfo(other) ->
+linux_which_cpuinfo(Distro) when (Distro =:= debian) orelse
+                                 (Distro =:= fedora) orelse
+                                 (Distro =:= linux_mint) orelse
+                                 (Distro =:= sles) orelse
+                                 (Distro =:= suse) orelse
+                                 (Distro =:= ubuntu) orelse
+                                 (Distro =:= other) ->
     CPU =
         case linux_cpuinfo_model_name() of
             "-" ->
-                %% ARM (at least some distros...)
-                case linux_cpuinfo_processor() of
-                    "-" ->
-                        %% Ok, we give up
-                        throw(noinfo);
-                    Proc ->
-                        Proc
-                end;
-            ModelName ->
+		%% This is for POWER9
+		case linux_cpuinfo_cpu() of
+		    "POWER9" ++ _ = PowerCPU ->
+			Machine =
+			    case linux_cpuinfo_machine() of
+				"-" ->
+				    "";
+				M ->
+				    " (" ++ M ++ ")"
+			    end,
+			PowerCPU ++ Machine;
+		    _X ->
+			%% ARM (at least some distros...)
+			case linux_cpuinfo_processor() of
+			    "-" ->
+				case linux_cpuinfo_model() of
+				    "-" ->
+					%% Ok, we give up
+					throw(noinfo);
+				    Model ->
+					Model
+				end;
+			    Proc ->
+				Proc
+			end
+		end;
+	    ModelName ->
                 ModelName
         end,
     case linux_cpuinfo_bogomips() of
@@ -1316,6 +1917,87 @@ linux_which_meminfo() ->
     end.
 
 
+linux_product_name() ->
+    ProductNameFile = "/sys/devices/virtual/dmi/id/product_name",
+    case file:read_file_info(ProductNameFile) of
+        {ok, _} ->
+            case os:cmd("cat " ++ ProductNameFile) of
+                false ->
+                    "-";
+                Info ->
+                    string:trim(Info)
+            end;
+        _ ->
+            "-"
+    end.
+
+
+linux_info_lookup(Key, File) ->
+    try [string:trim(S) || S <- string:tokens(os:cmd("grep " ++ "\"" ++ Key ++ "\"" ++ " " ++ File), [$:,$\n])] of
+        Info ->
+            linux_info_lookup_collect(Key, Info, [])
+    catch
+        _:_:_ ->
+            "-"
+    end.
+
+linux_info_lookup_collect(_Key, [], Values) ->
+    lists:reverse(Values);
+linux_info_lookup_collect(Key, [Key, Value|Rest], Values) ->
+    linux_info_lookup_collect(Key, Rest, [Value|Values]);
+linux_info_lookup_collect(_, _, Values) ->
+    lists:reverse(Values).
+
+
+linux_virt_factor() ->
+    linux_virt_factor(linux_product_name()).
+
+linux_virt_factor("VMware" ++ _) ->
+    2;
+linux_virt_factor("VirtualBox" ++ _) ->
+    4;
+linux_virt_factor(_) ->
+    0.
+
+
+linux_cpuinfo_machine() ->
+    case linux_cpuinfo_lookup("machine") of
+        [M] ->
+            M;
+        _ ->
+            "-"
+    end.
+
+linux_cpuinfo_clock() ->
+    %% This is written as: "3783.000000MHz"
+    %% So, check unit MHz (handle nothing else).
+    %% Also, check for both float and integer
+    %% Also,  the freq is per core, and can vary...
+    case linux_cpuinfo_lookup("clock") of
+        [C|_] when is_list(C) ->
+            case lists:reverse(string:to_lower(C)) of
+                "zhm" ++ CRev ->
+                    try trunc(list_to_float(lists:reverse(CRev))) of
+                        I ->
+                            I
+                    catch
+                        _:_:_ ->
+                            try list_to_integer(lists:reverse(CRev)) of
+                                I ->
+                                    I
+                            catch
+                                _:_:_ ->
+                                    0
+                            end
+                    end;
+                _ ->
+                    0
+            end;
+        _ ->
+            0
+    end.
+
+
 %% Just to be clear: This is ***not*** scientific...
 analyze_and_print_openbsd_host_info(Version) ->
     io:format("OpenBSD:"
@@ -1365,39 +2047,71 @@ analyze_and_print_openbsd_host_info(Version) ->
             io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
             CPUFactor =
                 if
-                    (CPUSpeed =:= -1) ->
-                        1;
+                    (CPUSpeed >= 3000) ->
+                        if
+                            (NCPU >= 8) ->
+                                1;
+                            (NCPU >= 6) ->
+                                2;
+                            (NCPU >= 4) ->
+                                3;
+                            (NCPU >= 2) ->
+                                4;
+                            true ->
+                                10
+                        end;
                     (CPUSpeed >= 2000) ->
                         if
-                            (NCPU >= 4) ->
-                                1;
-                            (NCPU >= 2) ->
+                            (NCPU >= 8) ->
                                 2;
+                            (NCPU >= 6) ->
+                                3;
+                            (NCPU >= 4) ->
+                                4;
+                            (NCPU >= 2) ->
+                                5;
                             true ->
-                                3
+                                12
+                        end;
+                    (CPUSpeed >= 1000) ->
+                        if
+                            (NCPU >= 8) ->
+                                3;
+                            (NCPU >= 6) ->
+                                4;
+                            (NCPU >= 4) ->
+                                5;
+                            (NCPU >= 2) ->
+                                6;
+                            true ->
+                                14
                         end;
                     true ->
                         if
+                            (NCPU >= 8) ->
+                                4;
+                            (NCPU >= 6) ->
+                                6;
                             (NCPU >= 4) ->
-                                2;
+                                8;
                             (NCPU >= 2) ->
-                                3;
+                                10;
                             true ->
-                                4
+                                20
                         end
                 end,
             MemAddFactor =
                 if
-                    (Memory =:= -1) ->
+                    (Memory >= 16777216) ->
                         0;
                     (Memory >= 8388608) ->
-                        0;
-                    (Memory >= 4194304) ->
                         1;
+                    (Memory >= 4194304) ->
+                        3;
                     (Memory >= 2097152) ->
-                        2;
+                        5;
                     true ->
-                        3
+                        10
                 end,
             {CPUFactor + MemAddFactor, []}
         end
@@ -1697,47 +2411,58 @@ analyze_and_print_darwin_host_info(Version) ->
     %% we need to find some other way to find some info...
     %% Also, I suppose its possible that we for some other
     %% reason *fail* to get the info...
-    case analyze_darwin_software_info() of
-        [] ->
-            io:format("Darwin:"
-                      "~n   Version:               ~s"
-                      "~n   Num Online Schedulers: ~s"
-                      "~n", [Version, str_num_schedulers()]),
-            {num_schedulers_to_factor(), []};
-        SwInfo when  is_list(SwInfo) ->
-            SystemVersion = analyze_darwin_sw_system_version(SwInfo),
-            KernelVersion = analyze_darwin_sw_kernel_version(SwInfo),
-            HwInfo        = analyze_darwin_hardware_info(),
-            ModelName     = analyze_darwin_hw_model_name(HwInfo),
-            ModelId       = analyze_darwin_hw_model_identifier(HwInfo),
-            ProcName      = analyze_darwin_hw_processor_name(HwInfo),
-            ProcSpeed     = analyze_darwin_hw_processor_speed(HwInfo),
-            NumProc       = analyze_darwin_hw_number_of_processors(HwInfo),
-            NumCores      = analyze_darwin_hw_total_number_of_cores(HwInfo),
-            Memory        = analyze_darwin_hw_memory(HwInfo),
-            io:format("Darwin:"
-                      "~n   System Version:        ~s"
-                      "~n   Kernel Version:        ~s"
-                      "~n   Model:                 ~s (~s)"
-                      "~n   Processor:             ~s (~s, ~s, ~s)"
-                      "~n   Memory:                ~s"
-                      "~n   Num Online Schedulers: ~s"
-                      "~n", [SystemVersion, KernelVersion,
-                             ModelName, ModelId,
-                             ProcName, ProcSpeed, NumProc, NumCores, 
-                             Memory,
-                             str_num_schedulers()]),
-            CPUFactor = analyze_darwin_cpu_to_factor(ProcName,
-                                                     ProcSpeed,
-                                                     NumProc,
-                                                     NumCores),
-            MemFactor = analyze_darwin_memory_to_factor(Memory),
-            if (MemFactor =:= 1) ->
-                    {CPUFactor, []};
-               true ->
-                    {CPUFactor + MemFactor, []}
-            end
-    end.
+    Label  = ts_extra_platform_label(),
+    {BaseFactor, MemFactor} =
+        case analyze_darwin_software_info() of
+            [] ->
+                io:format("Darwin:"
+                          "~n   Version:                 ~s"
+                          "~n   Num Online Schedulers:   ~s"
+                          "~n   TS Extra Platform Label: ~s"
+                          "~n", [Version, str_num_schedulers(), Label]),
+                {num_schedulers_to_factor(), 1};
+            SwInfo when  is_list(SwInfo) ->
+                SystemVersion = analyze_darwin_sw_system_version(SwInfo),
+                KernelVersion = analyze_darwin_sw_kernel_version(SwInfo),
+                HwInfo        = analyze_darwin_hardware_info(),
+                ModelName     = analyze_darwin_hw_model_name(HwInfo),
+                ModelId       = analyze_darwin_hw_model_identifier(HwInfo),
+                {Processor, CPUFactor} = analyze_darwin_hw_processor(HwInfo),
+                Memory        = analyze_darwin_hw_memory(HwInfo),
+                io:format("Darwin:"
+                          "~n   System Version:          ~s"
+                          "~n   Kernel Version:          ~s"
+                          "~n   Model:                   ~s (~s)"
+                          "~n   Processor:               ~s"
+                          "~n   Memory:                  ~s"
+                          "~n   Num Online Schedulers:   ~s"
+                          "~n   TS Extra Platform Label: ~s"
+                          "~n~n",
+                          [SystemVersion, KernelVersion,
+                           ModelName, ModelId,
+                           Processor, 
+                           Memory,
+                           str_num_schedulers(), Label]),
+                {CPUFactor, analyze_darwin_memory_to_factor(Memory)}
+        end,
+    AddLabelFactor = label2factor(simplify_label(Label)),
+    AddMemFactor = if
+                       (MemFactor > 0) ->
+                           MemFactor - 1;
+                       true ->
+                           0
+                   end,
+    TSScaleFactor = ts_scale_factor(),
+    io:format("Factor calc:"
+              "~n      Base Factor:     ~w"
+              "~n      Label Factor:    ~w"
+              "~n      Mem Factor:      ~w"
+              "~n      TS Scale Factor: ~w"
+              "~n~n",
+              [BaseFactor, AddLabelFactor, AddMemFactor, TSScaleFactor]),
+    {BaseFactor + AddLabelFactor + AddMemFactor + TSScaleFactor,
+     [{label, Label}]}.
+    
 
 analyze_darwin_sw_system_version(SwInfo) ->
     proplists:get_value("system version", SwInfo, "-").
@@ -1753,6 +2478,32 @@ analyze_darwin_hw_model_name(HwInfo) ->
 
 analyze_darwin_hw_model_identifier(HwInfo) ->
     proplists:get_value("model identifier", HwInfo, "-").
+
+analyze_darwin_hw_processor(HwInfo) ->
+    case analyze_darwin_hw_processor_name(HwInfo) of
+        "-" -> % Maybe Apple Chip
+            case analyze_darwin_hw_chip(HwInfo) of
+                "-" ->
+                    "-";
+                Chip ->
+                    NumCores = analyze_darwin_hw_total_number_of_cores(HwInfo),
+                    CPUFactor = analyze_darwin_cpu_to_factor(Chip, NumCores),
+                    {f("~s [~s]", [Chip, NumCores]), CPUFactor}
+            end;
+        ProcName ->
+            ProcSpeed = analyze_darwin_hw_processor_speed(HwInfo),
+            NumProc   = analyze_darwin_hw_number_of_processors(HwInfo),
+            NumCores  = analyze_darwin_hw_total_number_of_cores(HwInfo),
+            CPUFactor = analyze_darwin_cpu_to_factor(ProcName,
+                                                     ProcSpeed,
+                                                     NumProc,
+                                                     NumCores),
+            {f("~s [~s, ~s, ~s]",
+               [ProcName, ProcSpeed, NumProc, NumCores]), CPUFactor}
+    end.
+
+analyze_darwin_hw_chip(HwInfo) ->
+    proplists:get_value("chip", HwInfo, "-").
 
 analyze_darwin_hw_processor_name(HwInfo) ->
     proplists:get_value("processor name", HwInfo, "-").
@@ -1778,16 +2529,24 @@ analyze_darwin_hardware_info() ->
 %%    "Key: Value1:Value2"
 analyze_darwin_system_profiler(DataType) ->
     %% First, make sure the program actually exist:
-    case os:cmd("which system_profiler") of
+    case string:trim(os:cmd("which system_profiler")) of
         [] ->
-            [];
-        _ ->
-            D0 = os:cmd("system_profiler " ++ DataType),
-            D1 = string:tokens(D0, [$\n]),
-            D2 = [string:trim(S1) || S1 <- D1],
-            D3 = [string:tokens(S2, [$:]) || S2 <- D2],
-            analyze_darwin_system_profiler2(D3)
+            case string:trim(os:cmd("which /usr/sbin/system_profiler")) of
+                [] ->
+                    [];
+                Cmd1 ->
+                    analyze_darwin_system_profiler(Cmd1, DataType)
+            end;
+        Cmd2 ->
+            analyze_darwin_system_profiler(Cmd2, DataType)
     end.
+
+analyze_darwin_system_profiler(Cmd, DataType) ->
+    D0 = os:cmd(Cmd ++ " " ++ DataType),
+    D1 = string:tokens(D0, [$\n]),
+    D2 = [string:trim(S1) || S1 <- D1],
+    D3 = [string:tokens(S2, [$:]) || S2 <- D2],
+    analyze_darwin_system_profiler2(D3).
 
 analyze_darwin_system_profiler2(L) ->
     analyze_darwin_system_profiler2(L, []).
@@ -1836,6 +2595,12 @@ analyze_darwin_memory_to_factor(Mem) ->
         _ ->
             20
     end.
+
+
+analyze_darwin_cpu_to_factor("Apple" ++ _ = _Chip, _NumCores) ->
+    1;
+analyze_darwin_cpu_to_factor(_Chip, _NumCores) ->
+    8.
 
 
 %% The speed is a string: "<speed> <unit>"
@@ -2106,66 +2871,118 @@ analyze_and_print_solaris_host_info(Version) ->
 
 
 analyze_and_print_win_host_info(Version) ->
+    Label          = ts_extra_platform_label(),
+    AddLabelFactor = label2factor(simplify_label(Label)),
+
     SysInfo    = which_win_system_info(),
     OsName     = win_sys_info_lookup(os_name,             SysInfo),
     OsVersion  = win_sys_info_lookup(os_version,          SysInfo),
     SysMan     = win_sys_info_lookup(system_manufacturer, SysInfo),
     SysMod     = win_sys_info_lookup(system_model,        SysInfo),
+    SysType    = win_sys_info_lookup(system_type,         SysInfo),
     NumProcs   = win_sys_info_lookup(num_processors,      SysInfo),
     TotPhysMem = win_sys_info_lookup(total_phys_memory,   SysInfo),
     io:format("Windows: ~s"
               "~n   OS Version:             ~s (~p)"
               "~n   System Manufacturer:    ~s"
               "~n   System Model:           ~s"
+              "~n   System Type:            ~s"
               "~n   Number of Processor(s): ~s"
               "~n   Total Physical Memory:  ~s"
+              "~n   (Erlang) WordSize:      ~w"
               "~n   Num Online Schedulers:  ~s"
               "~n~n", [OsName, OsVersion, Version,
-                       SysMan, SysMod, NumProcs, TotPhysMem,
+                       SysMan, SysMod, SysType,
+                       NumProcs, TotPhysMem,
+                       erlang:system_info(wordsize),
                        str_num_schedulers()]),
-    io:format("TS Scale Factor: ~w~n", [timetrap_scale_factor()]),
+
+    io:format("TS: "
+              "~n   TimeTrap Factor:      ~w"
+              "~n   Extra Platform Label: ~s"
+              "~n~n",
+              [timetrap_scale_factor(), Label]),
+
+    %% 'VirtFactor' will be 0 unless virtual
+    VirtFactor = win_virt_factor(SysMod),
+
+    %% On some machines this is a badly formated string
+    %% (contains a char of 255), so we need to do some nasty stuff...
     MemFactor =
         try
             begin
-                [MStr, MUnit|_] =
-                    string:tokens(lists:delete($,, TotPhysMem), [$\ ]),
+                %% "Normally" this looks like this: "16,123 MB"
+                %% But sometimes the "," is replaced by a
+		%% 255 or 160 char, which I assume must be some
+		%% unicode screwup...
+                %% Anyway, filter out both of them!
+                TotPhysMem1 = lists:delete($,, TotPhysMem),
+                TotPhysMem2 = lists:delete(255, TotPhysMem1),
+                TotPhysMem3 = lists:delete(160, TotPhysMem2),
+                [MStr, MUnit|_] = string:tokens(TotPhysMem3, [$\ ]),
                 case string:to_lower(MUnit) of
                     "gb" ->
                         try list_to_integer(MStr) of
-                            M when M > 8 ->
+                            M when M >= 16 ->
                                 0;
-                            M when M > 4 ->
+                            M when M >= 8 ->
                                 1;
-                            M when M > 2 ->
-                                2;
+                            M when M >= 4 ->
+                                3;
+                            M when M >= 2 ->
+                                6;
                             _ -> 
-                                5
+                                10
                         catch
                             _:_:_ ->
+                                %% For some reason the string contains
+                                %% "unusual" characters...
+                                %% ...so print the string as a list...
+                                io:format("Bad memory string: "
+                                          "~n   [gb] ~w"
+                                          "~n", [MStr]),
                                 10
                         end;
                     "mb" ->
                         try list_to_integer(MStr) of
-                            M when M > 8192 ->
+                            M when M >= 16384 ->
                                 0;
-                            M when M > 4096 ->
+                            M when M >= 8192 ->
                                 1;
-                            M when M > 2048 ->
-                                2;
+                            M when M >= 4096 ->
+                                3;
+                            M when M >= 2048 ->
+                                6;
                             _ -> 
-                                5
+                                10
                         catch
                             _:_:_ ->
+                                %% For some reason the string contains
+                                %% "unusual" characters...
+                                %% ...so print the string as a list...
+                                io:format("Bad memory string: "
+                                          "~n   [mb] ~w"
+                                          "~n", [MStr]),
                                 10
                         end;
                     _ ->
+                        io:format("Bad memory string: "
+                                  "~n   ~w"
+                                  "~n", [MStr]),
                         10
                 end
             end
         catch
             _:_:_ ->
+                %% For some reason the string contains
+                %% "unusual" characters...
+                %% ...so print the string as a list...
+                io:format("Bad memory string: "
+                          "~n   (y) ~w"
+                          "~n", [TotPhysMem]),
                 10
         end,
+
     CPUFactor = 
         case erlang:system_info(schedulers) of
             1 ->
@@ -2175,7 +2992,19 @@ analyze_and_print_win_host_info(Version) ->
             _ ->
                 2
         end,
-    {CPUFactor + MemFactor, SysInfo}.
+    io:format("Factor calc:"
+              "~n      CPU Factor:     ~w"
+              "~n      Mem Factor:     ~w"
+              "~n      Label Factor:   ~w"
+              "~n      Virtual Factor: ~w"
+              "~n~n",
+              [CPUFactor, MemFactor, AddLabelFactor, VirtFactor]),
+    {CPUFactor + MemFactor + AddLabelFactor + VirtFactor, SysInfo}.
+
+win_virt_factor("VMware" ++ _) ->
+    2;
+win_virt_factor(_) ->
+    0.
 
 win_sys_info_lookup(Key, SysInfo) ->
     win_sys_info_lookup(Key, SysInfo, "-").
@@ -2256,8 +3085,12 @@ num_schedulers_to_factor() ->
         1 ->
             10;
         2 ->
-            5;
-        N when (N =< 6) ->
+            8;
+        3 ->
+            6;
+        4 ->
+            4;
+        N when (N =< 5) ->
             2;
         _ ->
             1
@@ -2265,38 +3098,6 @@ num_schedulers_to_factor() ->
         _:_:_ ->
             10
     end.
-
-
-linux_info_lookup(Key, File) ->
-    %% try
-    %%     begin
-    %%         GREP   = os:cmd("grep " ++ "\"" ++ Key ++ "\"" ++ " " ++ File),
-    %%         io:format("linux_info_lookup() -> GREP:   ~p~n", [GREP]),
-    %%         TOKENS = string:tokens(GREP, [$:,$\n]),
-    %%         io:format("linux_info_lookup() -> TOKENS: ~p~n", [TOKENS]),
-    %%         INFO   = [string:trim(S) || S <- TOKENS],
-    %%         io:format("linux_info_lookup() -> INFO:   ~p~n", [INFO]),
-    %%         linux_info_lookup_collect(Key, INFO, [])
-    %%     end
-    %% catch
-    %%     _:_:_ ->
-    %%         "-"
-    %% end.
-    try [string:trim(S) || S <- string:tokens(os:cmd("grep " ++ "\"" ++ Key ++ "\"" ++ " " ++ File), [$:,$\n])] of
-        Info ->
-            linux_info_lookup_collect(Key, Info, [])
-    catch
-        _:_:_ ->
-            "-"
-    end.
-
-linux_info_lookup_collect(_Key, [], Values) ->
-    lists:reverse(Values);
-linux_info_lookup_collect(Key, [Key, Value|Rest], Values) ->
-    linux_info_lookup_collect(Key, Rest, [Value|Values]);
-linux_info_lookup_collect(_, _, Values) ->
-    lists:reverse(Values).
-
 
 
 %% ----------------------------------------------------------------
@@ -2375,15 +3176,6 @@ nodes_on(Host) when is_list(Host) ->
     net_adm:world_list([list_to_atom(Host)]).
 
 
-start_node(Name, Args) ->
-    Opts = [{cleanup, false}, {args, Args}],
-    test_server:start_node(Name, peer, Opts).
-
-
-stop_node(Node) ->
-    test_server:stop_node(Node).
-
-
 %% ----------------------------------------------------------------
 %% Application and Crypto utility functions
 %% 
@@ -2402,7 +3194,7 @@ is_snmp_running() ->
     is_app_running(snmp).
 
 crypto_start() ->
-    try crypto:start() of
+    try application:start(crypto) of
         ok ->
             ok;
         {error, {already_started,crypto}} ->
@@ -2571,6 +3363,20 @@ timetrap_scale_factor() ->
 	    N
     end.
 
+ftime(BaseTime, Factor)
+  when is_integer(BaseTime) andalso (BaseTime > 0) andalso
+       is_integer(Factor) andalso (0 < Factor) andalso (Factor < 3) ->
+    BaseTime;
+ftime(BaseTime, Factor)
+  when is_integer(BaseTime) andalso (BaseTime > 0) andalso
+       is_integer(Factor) andalso (3 =< Factor) andalso (Factor =< 10) ->
+    BaseTime + (Factor-2) * (BaseTime div 4);
+ftime(BaseTime, Factor)
+  when is_integer(BaseTime) andalso (BaseTime > 0) andalso
+       is_integer(Factor) andalso (10 < Factor) ->
+    3*BaseTime + (Factor-10) * (BaseTime div 10).
+    
+    
     
 %% ----------------------------------------------------------------------
 %% file & dir functions
@@ -2628,6 +3434,12 @@ del_file_or_dir(FileOrDir) ->
 	    ok
     end.
 	    
+
+%% ----------------------------------------------------------------------
+
+pi(P, Key) ->
+    {Key, Value} = erlang:process_info(P, Key),
+    Value.
 
 %% ----------------------------------------------------------------------
 %% (debug) Print functions

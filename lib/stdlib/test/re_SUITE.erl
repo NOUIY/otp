@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2025. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,9 +20,11 @@
 -module(re_SUITE).
 
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
-	 init_per_group/2,end_per_group/2, pcre/1,compile_options/1,
+	 init_per_group/2,end_per_group/2, pcre2/1,compile_options/1,
+         old_pcre1/1,
+         pcre2_incompat/1,
 	 run_options/1,combined_options/1,replace_autogen/1,
-	 global_capture/1,replace_input_types/1,replace_return/1,
+	 global_capture/1,replace_input_types/1,replace_with_fun/1,replace_return/1,
 	 split_autogen/1,split_options/1,split_specials/1,
 	 error_handling/1,pcre_cve_2008_2371/1,re_version/1,
 	 pcre_compile_workspace_overflow/1,re_infinite_loop/1, 
@@ -40,9 +42,11 @@ suite() ->
      {timetrap,{minutes,3}}].
 
 all() -> 
-    [pcre, compile_options, run_options, combined_options,
+    [pcre2, compile_options, run_options, combined_options,
+     old_pcre1,
+     pcre2_incompat,
      replace_autogen, global_capture, replace_input_types,
-     replace_return, split_autogen, split_options,
+     replace_with_fun, replace_return, split_autogen, split_options,
      split_specials, error_handling, pcre_cve_2008_2371,
      pcre_compile_workspace_overflow, re_infinite_loop, 
      re_backwards_accented, opt_dupnames, opt_all_names, 
@@ -67,10 +71,17 @@ end_per_group(_GroupName, Config) ->
     Config.
 
 
-%% Run all applicable tests from the PCRE testsuites.
-pcre(Config) when is_list(Config) ->
+%% Run all applicable tests from the PCRE2 testsuites.
+pcre2(Config) when is_list(Config) ->
     RootDir = proplists:get_value(data_dir, Config),
     Res = run_pcre_tests:test(RootDir),
+    0 = lists:sum([ X || {X,_,_} <- Res ]),
+    {comment,Res}.
+
+%% Run tests from the old PCRE testsuites.
+old_pcre1(Config) when is_list(Config) ->
+    RootDir = proplists:get_value(data_dir, Config),
+    Res = run_old_pcre1_tests:test(RootDir),
     0 = lists:sum([ X || {X,_,_} <- Res ]),
     {comment,Res}.
 
@@ -115,45 +126,34 @@ compile_options(Config) when is_list(Config) ->
 
 %% Test all documented run specific options.
 run_options(Config) when is_list(Config) ->
-    rtest("ABCabcdABC","abc",[],[],true),
-    rtest("ABCabcdABC","abc",[anchored],[],false),
+    rtest("ABCabcdABC","abc",[],[], match),
+    rtest("ABCabcdABC","abc",[anchored],[], nomatch),
     %% Anchored in run overrides unanchored in compilation
-    rtest("ABCabcdABC","abc",[],[anchored],false),
+    rtest("ABCabcdABC","abc",[],[anchored], nomatch),
 
-    rtest("","a?b?",[],[],true),
-    rtest("","a?b?",[],[notempty],false),
+    rtest("","a?b?",[],[], match),
+    rtest("","a?b?",[],[notempty], nomatch),
 
-    rtest("abc","^a",[],[],true),
-    rtest("abc","^a",[],[notbol],false),
-    rtest("ab\nc","^a",[multiline],[],true),
-    rtest("ab\nc","^a",[multiline],[notbol],false),
-    rtest("ab\nc","^c",[multiline],[notbol],true),
+    rtest("abc","^a",[],[], match),
+    rtest("abc","^a",[],[notbol], nomatch),
+    rtest("ab\nc","^a",[multiline],[], match),
+    rtest("ab\nc","^a",[multiline],[notbol], nomatch),
+    rtest("ab\nc","^c",[multiline],[notbol], match),
 
-    rtest("abc","c$",[],[],true),
-    rtest("abc","c$",[],[noteol],false),
+    rtest("abc","c$",[],[], match),
+    rtest("abc","c$",[],[noteol], nomatch),
 
-    rtest("ab\nc","b$",[multiline],[],true),
-    rtest("ab\nc","c$",[multiline],[],true),
-    rtest("ab\nc","b$",[multiline],[noteol],true),
-    rtest("ab\nc","c$",[multiline],[noteol],false),
+    rtest("ab\nc","b$",[multiline],[], match),
+    rtest("ab\nc","c$",[multiline],[], match),
+    rtest("ab\nc","b$",[multiline],[noteol], match),
+    rtest("ab\nc","c$",[multiline],[noteol], nomatch),
 
-    rtest("abc","ab",[],[{offset,0}],true),
-    rtest("abc","ab",[],[{offset,1}],false),
+    rtest("abc","ab",[],[{offset,0}], match),
+    rtest("abc","ab",[],[{offset,1}], nomatch),
 
-    rtest("abcdABCabcABC\nD","abcd.*D",[],[],false),
-    rtest("abcdABCabcABC\nD","abcd.*D",[],[{newline,cr}],true),
-    rtest("abcdABCabcABC\rD","abcd.*D",[],[],true),
-    rtest("abcdABCabcABC\rD","abcd.*D",[{newline,cr}],[{newline,lf}],true),
-    rtest("abcdABCabcd\r\n","abcd$",[],[{newline,lf}],false),
-    rtest("abcdABCabcd\r\n","abcd$",[],[{newline,cr}],false),
-    rtest("abcdABCabcd\r\n","abcd$",[],[{newline,crlf}],true),
-
-    rtest("abcdABCabcd\r","abcd$",[],[{newline,crlf}],false),
-    rtest("abcdABCabcd\n","abcd$",[],[{newline,crlf}],false),
-    rtest("abcdABCabcd\r\n","abcd$",[],[{newline,anycrlf}],true),
-
-    rtest("abcdABCabcd\r","abcd$",[],[{newline,anycrlf}],true),
-    rtest("abcdABCabcd\n","abcd$",[],[{newline,anycrlf}],true),
+    rtest("abcdABCabcABC\nD","abcd.*D",[],[], nomatch),
+    rtest("abcdABCabcABC\rD","abcd.*D",[],[], match),
+    rtest("abcdABCabcd\r\n","abcd$",[],[{newline,lf}], nomatch),
 
     {ok,MP} = re:compile(".*(abcd).*"),
     {match,[{0,10},{3,4}]} = re:run("ABCabcdABC",MP,[]),
@@ -162,7 +162,7 @@ run_options(Config) when is_list(Config) ->
     {match,["ABCabcdABC","abcd"]} = re:run("ABCabcdABC",MP,[{capture,all,list}]),
     {match,[<<"ABCabcdABC">>,<<"abcd">>]} = re:run("ABCabcdABC",MP,[{capture,all,binary}]),
     {match,[{0,10}]} = re:run("ABCabcdABC",MP,[{capture,first}]),
-    {match,[{0,10}]} = re:run("ABCabcdABC",MP,[{capture,first,index}]),       ?line {match,["ABCabcdABC"]} = re:run("ABCabcdABC",MP,[{capture,first,list}]),
+    {match,[{0,10}]} = re:run("ABCabcdABC",MP,[{capture,first,index}]),       {match,["ABCabcdABC"]} = re:run("ABCabcdABC",MP,[{capture,first,list}]),
     {match,[<<"ABCabcdABC">>]} = re:run("ABCabcdABC",MP,[{capture,first,binary}]),
 
     {match,[{3,4}]} = re:run("ABCabcdABC",MP,[{capture,all_but_first}]),
@@ -197,11 +197,41 @@ run_options(Config) when is_list(Config) ->
     ok.
 
 
+pcre2_incompat(Config) when is_list(Config) ->
+    %% Not allowed to pass changed newline option to re:run/3
+    rtest("abcdABCabcABC\nD", "abcd.*D", [], [{newline,cr}],  badarg),
+    rtest("abcdABCabcd\r\n", "abcd$", [], [{newline,crlf}],  badarg),
+    rtest("abcdABCabcd\r\n", "abcd$", [], [{newline,anycrlf}],  badarg),
+    rtest("abcdABCabcd\r", "abcd$", [], [{newline,any}],  badarg),
 
-%% Test the version is retorned correctly
+    [rtest("abcdABCabcd\r", "abcd$", [{newline,C}], [{newline,R}],  badarg)
+     || C <- [lf, cr, crlf, anycrlf, any],
+        R <- [lf, cr, crlf, anycrlf, any],
+        C =/= R],
+
+    %% But we do allowed to pass an unchanged newline option to re:run/3
+    rtest("abcdABCabcABC\rD", "abcd.*D", [], [{newline,lf}],  match),
+
+    [rtest("abcABC", "abc", [{newline,NL}], [{newline,NL}],  match)
+     || NL <- [lf, cr, crlf, anycrlf, any]],
+
+    %% Not allowed to pass changed BSR option to re:run/3
+    rtest("abcdABCabcABC\nD", "abcd.*D", [], [bsr_anycrlf],  badarg),
+    rtest("abcdABCabcd\r", "abcd$", [bsr_unicode], [bsr_anycrlf], badarg),
+    rtest("abcdABCabcd\r", "abcd$", [bsr_anycrlf], [bsr_unicode], badarg),
+
+    %% But we do allowed an unchanged BSR option to re:run/3
+    rtest("abcd\x{85}D", "abcd\\RD", [], [bsr_unicode],  match),
+    rtest("abcd\x{85}D", "abcd\\RD", [bsr_unicode], [bsr_unicode],  match),
+    rtest("abcd\r\nD", "abcd\\RD", [bsr_anycrlf], [bsr_anycrlf],  match),
+    ok.
+
+%% Test the version is returned correctly
 re_version(_Config) ->
     Version = re:version(),
-    {match,[Version]} = re:run(Version,"^[0-9]\\.[0-9]{2} 20[0-9]{2}-[0-9]{2}-[0-9]{2}",[{capture,all,binary}]),
+    {match,[Version]} = re:run(Version,
+                               ~B"^\d{2}\.\d{2} 20\d{2}-\d{2}-\d{2}",
+                               [{capture,all,binary}]),
     ok.
 
 global_unicode_validation(Config) when is_list(Config) ->
@@ -365,6 +395,16 @@ replace_input_types(Config) when is_list(Config) ->
     <<"a",208,128,"cd">> = re:replace(<<"abcd">>,"b","\x{400}",[{return,binary},unicode]),
     ok.
 
+%% Test replace with a replacement function.
+replace_with_fun(Config) when is_list(Config) ->
+    <<"ABCD">> = re:replace("abcd", ".", fun(<<C>>, []) -> <<(C - $a + $A)>> end, [global, {return, binary}]),
+    <<"AbCd">> = re:replace("abcd", ".", fun(<<C>>, []) when (C - $a) rem 2 =:= 0 -> <<(C - $a + $A)>>; (C, []) -> C end, [global, {return, binary}]),
+    <<"b-ad-c">> = re:replace("abcd", "(.)(.)", fun(_, [A, B]) -> <<B/binary, $-, A/binary>> end, [global, {return, binary}]),
+    <<"#ab-B#cd">> = re:replace("abcd", ".(.)", fun(Whole, [<<C>>]) -> <<$#, Whole/binary, $-, (C - $a + $A), $#>> end, [{return, binary}]),
+    <<"#ab#cd">> = re:replace("abcd", ".(x)?(.)", fun(Whole, [<<>>, _]) -> <<$#, Whole/binary, $#>> end, [{return, binary}]),
+    <<"#ab#cd">> = re:replace("abcd", ".(.)(x)?", fun(Whole, [_]) -> <<$#, Whole/binary, $#>> end, [{return, binary}]),
+    ok.
+
 %% Test return options of replace together with global searching.
 replace_return(Config) when is_list(Config) ->
     {'EXIT',{badarg,_}} = (catch re:replace("na","(a","")),
@@ -389,14 +429,22 @@ replace_return(Config) when is_list(Config) ->
     ok = replacetest("a\x{400}bcd","Z","X",[global,{return,binary},unicode],<<"a",208,128,"bcd">>),
     ok.
 
-rtest(Subj, RE, Copt, Ropt, true) ->
+rtest(Subj, RE, Copt, Ropt, match) ->
     {ok,MP} = re:compile(RE,Copt), 
     {match,_} = re:run(Subj,MP,Ropt),
     ok;
-rtest(Subj, RE, Copt, Ropt, false) ->
+rtest(Subj, RE, Copt, Ropt, nomatch) ->
     {ok,MP} = re:compile(RE,Copt), 
     nomatch = re:run(Subj,MP,Ropt),
-    ok.
+    ok;
+rtest(Subj, RE, Copt, Ropt, badarg) ->
+    {ok,MP} = re:compile(RE,Copt),
+    ok = try
+             re:run(Subj,MP,Ropt),
+             error
+         catch
+             error:badarg -> ok
+         end.
 
 ctest(_,RE,Options,false,_) ->
     case re:compile(RE,Options) of
@@ -406,14 +454,10 @@ ctest(_,RE,Options,false,_) ->
 	    ok
     end;
 ctest(Subject,RE,Options,true,Result) ->
-    try
-	{ok, Prog} = re:compile(RE,Options),
-	Result = re:run(Subject,Prog,[]),
-	ok
-    catch
-	_:_ ->
-	    error
-    end.
+    {ok, Prog} = re:compile(RE,Options),
+    Result = re:run(Subject,Prog,[]),
+    ok.
+
 crtest(_,RE,Options,false,_) ->
     case (catch re:run("",RE,Options)) of
 	{'EXIT',{badarg,_}} ->
@@ -466,6 +510,10 @@ split_autogen(Config) when is_list(Config) ->
 
 %% Test special options to split.
 split_options(Config) when is_list(Config) ->
+    ok = splittest("", "", [trim], []),
+    ok = splittest("", " ", [trim], []),
+    ok = splittest("", "()", [group, trim], []),
+    ok = splittest("", "( )", [group, trim], []),
     ok = splittest("a b c ","( )",[group,trim],[[<<"a">>,<<" ">>],[<<"b">>,<<" ">>],[<<"c">>,<<" ">>]]),
     ok = splittest("a b c ","( )",[group,{parts,0}],[[<<"a">>,<<" ">>],[<<"b">>,<<" ">>],[<<"c">>,<<" ">>]]),
     ok = splittest("a b c ","( )",[{parts,infinity},group],[[<<"a">>,<<" ">>],[<<"b">>,<<" ">>],[<<"c">>,<<" ">>],[<<>>]]),
@@ -665,10 +713,10 @@ pcre_cve_2008_2371(Config) when is_list(Config) ->
 %% Patch from
 %% http://vcs.pcre.org/viewvc/code/trunk/pcre_compile.c?r1=504&r2=505&view=patch
 pcre_compile_workspace_overflow(Config) when is_list(Config) ->
-    N = 819,
+    N = 1180,
     ExpStr = "Got expected error: ",
     case re:compile([lists:duplicate(N, $(), lists:duplicate(N, $))]) of
-        {error, {"regular expression is too complicated" = Str,799}} ->
+        {error, {"regular expression is too complicated" = Str,2360}} ->
             {comment, ExpStr ++ Str};
         {error, {"parentheses are too deeply nested (stack check)" = Str, _No}} ->
             {comment, ExpStr ++ Str};
@@ -896,9 +944,9 @@ opt_never_utf(Config) when is_list(Config) ->
 %% Check that the ucp option is passed to PCRE.
 opt_ucp(Config) when is_list(Config) ->
     {match,[{0,1}]} = re:run([$a],"\\w",[unicode]),
-    {match,[{0,2}]} = re:run([229],"\\w",[unicode]), % Latin1 works without UCP, as we have a default 
-    %% Latin1 table
-    nomatch = re:run([1024],"\\w",[unicode]), % Latin1 word characters only, 1024 is not latin1
+    nomatch = re:run([229],"\\w",[unicode]), % Latin1 do not work without UCP anymore, ASCII is default
+    nomatch = re:run([1024],"\\w",[unicode]), % and neither do non Latin1 code points.
+    {match,[{0,2}]} = re:run([229],"\\w",[unicode,ucp]),  % Need ucp for Latin1
     {match,[{0,2}]} = re:run([1024],"\\w",[unicode,ucp]), % Any Unicode word character works with 'ucp'
     ok.
 
@@ -957,56 +1005,64 @@ bad_utf8_subject(Config) when is_list(Config) ->
     %% even though subject contained illegal
     %% utf8...
 
+    %% OTP-19015: re:run() ended up in an infinite loop
+    %% if both pattern and subject was binaries and
+    %% subject was long enough to trigger a yield.
+
     nomatch = re:run(<<255,255,255>>, <<"a">>, []),
     nomatch = re:run(<<255,255,255>>, "a", []),
     nomatch = re:run(<<"aaa">>, <<255>>, []),
     nomatch = re:run(<<"aaa">>, [255], []),
     {match,[{0,1}]} = re:run(<<255,255,255>>, <<255>>, []),
     {match,[{0,1}]} = re:run(<<255,255,255>>, [255], []),
-    %% Badarg on illegal utf8 in subject as of OTP 23...
-    try
-        re:run(<<255,255,255>>, <<"a">>, [unicode]),
-        error(unexpected)
-    catch
-        error:badarg ->
-            ok
-    end,
-    try
-        re:run(<<255,255,255>>, "a", [unicode]),
-        error(unexpected)
-    catch
-        error:badarg ->
-            ok
-    end,
-    try
-        re:run(<<"aaa">>, <<255>>, [unicode]),
-        error(unexpected)
-    catch
-        error:badarg ->
-            ok
-    end,
-    nomatch = re:run(<<"aaa">>, [255], [unicode]),
-    try
-        re:run(<<255,255,255>>, <<255>>, [unicode]),
-        error(unexpected)
-    catch
-        error:badarg ->
-            ok
-    end,
-    try
-        re:run(<<255,255,255>>, [255], [unicode]),
-        error(unexpected)
-    catch
-        error:badarg ->
-            ok
-    end.
+    [
+     begin
+         %% Badarg on illegal utf8 in subject as of OTP 23...
+         try
+             re:run(<<Prefix/binary, 255,255,255>>, <<"a">>, [unicode]),
+             error(unexpected)
+         catch
+             error:badarg ->
+                 ok
+         end,
+         try
+             re:run(<<Prefix/binary, 255,255,255>>, "a", [unicode]),
+             error(unexpected)
+         catch
+             error:badarg ->
+                 ok
+         end,
+         try
+             re:run(<<Prefix/binary, "aaa">>, <<255>>, [unicode]),
+             error(unexpected)
+         catch
+             error:badarg ->
+                 ok
+         end,
+         nomatch = re:run(<<Prefix/binary, "aaa">>, [255], [unicode]),
+         try
+             re:run(<<Prefix/binary, 255,255,255>>, <<255>>, [unicode]),
+             error(unexpected)
+         catch
+             error:badarg ->
+                 ok
+         end,
+         try
+             re:run(<<Prefix/binary, 255,255,255>>, [255], [unicode]),
+             error(unexpected)
+         catch
+             error:badarg ->
+                 ok
+         end
+     end || Prefix <- [<<>>, iolist_to_binary(lists:duplicate(100000, $a))]],
+    ok.
 
 error_info(_Config) ->
     BadRegexp = {re_pattern,0,0,0,<<"xyz">>},
     BadErr = "neither an iodata term",
     {ok,GoodRegexp} = re:compile(".*"),
     InvalidRegexp = <<"(.*))">>,
-    InvalidErr = "could not parse regular expression\n.*unmatched parentheses.*",
+    InvalidErr = "could not parse regular expression\n.*unmatched closing parenthesis.*",
 
     L = [{compile, [not_iodata]},
          {compile, [not_iodata, not_list],[{1,".*"},{2,".*"}]},

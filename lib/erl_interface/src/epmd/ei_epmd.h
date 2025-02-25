@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1998-2020. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2023. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 
 #ifndef EI_DIST_HIGH
 #define EI_DIST_HIGH EI_DIST_6
-#define EI_DIST_LOW  EI_DIST_5
+#define EI_DIST_LOW  EI_DIST_6
 #endif
 
 #ifndef EPMD_PORT

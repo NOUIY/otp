@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2000-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2000-2022. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -108,21 +108,24 @@ public class AbstractNode implements OtpTransportFactory {
         | dFlagNewFloats
         | dFlagMapTag
         | dFlagExportPtrTag
-        | dFlagBitBinaries;
+        | dFlagBitBinaries
+        | dFlagHandshake23;
 
+    /* New mandatory flags in OTP 26 */
+    static final long mandatoryFlags26 = dFlagV4PidsRefs
+        | dFlagUnlinkId;
+    
     /* Mandatory flags for distribution. Keep them in sync with
        DFLAG_DIST_MANDATORY in erts/emulator/beam/dist.h. */
-    static final long mandatoryFlags = mandatoryFlags25;
+    static final long mandatoryFlags = mandatoryFlags25
+        | mandatoryFlags26;
 
     int ntype = NTYPE_R6;
     int proto = 0; // tcp/ip
     int distHigh = 6;
-    int distLow = 5; // Cannot talk to nodes before R6
+    int distLow = 6; // Cannot talk to nodes before OTP 23
     private int creation = 0x710000;
     long flags = mandatoryFlags
-        | dFlagHandshake23
-        | dFlagUnlinkId
-        | dFlagV4PidsRefs
         | dFlagMandatory25Digest;
 
     /* initialize hostname and default cookie */
@@ -204,7 +207,7 @@ public class AbstractNode implements OtpTransportFactory {
         this.cookie = cookie;
         this.transportFactory = transportFactory;
 
-        final int i = name.indexOf('@', 0);
+        final int i = name.indexOf('@');
         if (i < 0) {
             alive = name;
             host = localHost;
@@ -285,12 +288,12 @@ public class AbstractNode implements OtpTransportFactory {
         return creation;
     }
 
-	void setCreation(int cr) throws OtpErlangDecodeException {
-		if (cr == 0) {
-			throw new OtpErlangDecodeException("Node creation 0 not allowed");
-		}
-		this.creation = cr;
-	}
+    void setCreation(int cr) throws OtpErlangDecodeException {
+        if (cr == 0) {
+            throw new OtpErlangDecodeException("Node creation 0 not allowed");
+        }
+        this.creation = cr;
+    }
 
     /**
      * Set the authorization cookie used by this node.
@@ -331,5 +334,45 @@ public class AbstractNode implements OtpTransportFactory {
     public OtpServerTransport createServerTransport(final int port)
             throws IOException {
         return transportFactory.createServerTransport(port);
+    }
+
+    /**
+     * Create a client-side transport for alternative distribution protocols
+     * using a transport factory extending the OtpGenericTransportFactory
+     * abstract class. Connect it to the specified server.
+     *
+     * @param peer
+     *            the peer identifying the server to connect to
+     *
+     */
+    public OtpTransport createTransport(final OtpPeer peer)
+            throws IOException {
+        if (transportFactory instanceof OtpGenericTransportFactory) {
+            return ((OtpGenericTransportFactory) transportFactory)
+                .createTransport(peer);
+        }
+        throw new IOException("Method createTransport(OtpPeer) " +
+                              "applicable only for Nodes with a transport " +
+                              "factory instance of OtpGenericTransportFactory");
+    }
+
+    /**
+     * Create a server-side transport for alternative distribution protocols
+     * using a transport factory extending the OtpGenericTransportFactory
+     * abstract class.
+     *
+     * @param node
+     *            the local node identifying the transport to create server-side
+     *
+     */
+    public OtpServerTransport createServerTransport(final OtpLocalNode node)
+            throws IOException {
+        if (transportFactory instanceof OtpGenericTransportFactory) {
+            return ((OtpGenericTransportFactory) transportFactory)
+                .createServerTransport(node);
+        }
+        throw new IOException("Method createServerTransport(OtpLocalNode) " +
+                              "applicable only for Nodes with a transport " +
+                              "factory instance of OtpGenericTransportFactory");
     }
 }

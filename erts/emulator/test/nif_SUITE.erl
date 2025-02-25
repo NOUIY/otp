@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2010-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2010-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,8 +37,8 @@
          t_load_race/1,
          t_call_nif_early/1,
          load_traced_nif/1,
-         select/1, select_steal/1,
-	 select_error/1,
+         select/1, select_scheduler/1,
+         select_steal/1, select_error/1,
          monitor_process_a/1,
          monitor_process_b/1,
          monitor_process_c/1,
@@ -46,7 +46,10 @@
          monitor_process_purge/1,
          demonitor_process/1,
          monitor_frenzy/1,
-	 types/1, many_args/1, binaries/1, get_string/1, get_atom/1,
+	 types/1, many_args/1, binaries/1,
+        get_string/1, get_string_length/1,
+        get_atom/1, get_atom_length/1,
+        make_new_atoms/1, make_existing_atoms/1,
 	 maps/1,
 	 api_macros/1,
 	 from_array/1, iolist_as_binary/1, resource/1, resource_binary/1,
@@ -72,6 +75,7 @@
          nif_whereis/1, nif_whereis_parallel/1,
          nif_whereis_threaded/1, nif_whereis_proxy/1,
          nif_ioq/1,
+         non_exported_nif/1,
          match_state_arg/1,
          pid/1,
          id/1,
@@ -93,12 +97,15 @@
        many_args_100/100,
        clone_bin/1,
        make_sub_bin/3,
-       string_to_bin/2,
-       atom_to_bin/2,
+       string_to_bin/3,
+       string_length/2,
+       atom_to_bin/3,
+       atom_length/2,
        macros/1,
        tuple_2_list_and_tuple/1,
        iolist_2_bin/1,
        get_resource_type/1,
+       init_resource_type/2,
        alloc_resource/2,
        make_resource/1,
        get_resource/2,
@@ -110,6 +117,8 @@
        check_is_exception/0,
        length_test/6,
        make_atoms/0,
+       make_new_atom/2,
+       make_existing_atom/2,
        make_strings/0,
        make_new_resource_binary/1,
        send_list_seq/2,
@@ -145,6 +154,7 @@
        select_nif/6,
        dupe_resource_nif/1,
        pipe_nif/0,
+       socketpair_nif/0,
        write_nif/2,
        read_nif/2,
        close_nif/1,
@@ -196,10 +206,14 @@
 -define(RT_CREATE,1).
 -define(RT_TAKEOVER,2).
 
+-define(ERL_NIF_LATIN1,1).
+-define(ERL_NIF_UTF8,2).
+
 suite() -> [{ct_hooks,[ts_install_cth]}].
 
 all() ->
-    [basic]
+    [basic,
+     non_exported_nif]
         ++
     [{group, G} || G <- api_groups()]
         ++
@@ -212,7 +226,9 @@ all() ->
      t_load_race,
      t_call_nif_early,
      load_traced_nif,
-     binaries, get_string, get_atom, maps, api_macros, from_array,
+     binaries, get_string, get_string_length,
+     get_atom, get_atom_length, make_new_atoms, make_existing_atoms,
+     maps, api_macros, from_array,
      iolist_as_binary, resource, resource_binary,
      threading, send, send2, send3,
      send_threaded, neg, is_checks, get_length, make_atom,
@@ -253,6 +269,7 @@ groups() ->
                     monitor_process_purge,
                     demonitor_process]},
      {select, [], [select,
+                   select_scheduler,
 		   select_error,
 		   select_steal]}].
 
@@ -283,7 +300,8 @@ init_per_testcase(nif_whereis_threaded, Config) ->
         false -> {skip, "No thread support"}
     end;
 init_per_testcase(Select, Config) when Select =:= select;
-                                       Select =:= select_steal ->
+                                       Select =:= select_steal;
+                                       Select =:= select_scheduler ->
     case os:type() of
         {win32,_} ->
             {skip, "Test not yet implemented for windows"};
@@ -303,6 +321,7 @@ end_per_testcase(_Func, _Config) ->
     testcase_cleanup().
 
 testcase_cleanup() ->
+    driver_SUITE:check_io_debug(),
     P1 = code:purge(nif_mod),
     Del = code:delete(nif_mod),
     P2 = code:purge(nif_mod),
@@ -315,6 +334,13 @@ basic(Config) when is_list(Config) ->
     [{load,1,1,101},{lib_version,1,2,102}] = call_history(),
     [] = call_history(),
     true = lists:member(?MODULE, erlang:system_info(taints)),
+    ok.
+
+%% Check that non-exported NIFs aren't exported by the compiler's
+%% beam_ssa_opt-pass.
+non_exported_nif(Config) when is_list(Config) ->
+    ensure_lib_loaded(Config),
+    false = lists:member({lib_version,0}, ?MODULE:module_info(exports)),
     ok.
 
 %% Test old reload feature now always fails
@@ -345,6 +371,7 @@ reload_error(Config) when is_list(Config) ->
 
     %%false= check_process_code(Pid, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,5,105}] = nif_mod_call_history(),
 
     true = lists:member(?MODULE, erlang:system_info(taints)),
@@ -382,6 +409,7 @@ upgrade(Config) when is_list(Config) ->
     upgraded = call(Pid,upgrade),
     false = check_process_code(Pid, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,7,107}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -403,6 +431,7 @@ upgrade(Config) when is_list(Config) ->
     upgraded = call(Pid,upgrade),
     false = check_process_code(Pid, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,12,112}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -416,6 +445,7 @@ upgrade(Config) when is_list(Config) ->
     {'DOWN', MRef, process, Pid, normal} = receive_any(),
     false = check_process_code(Pid, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,14,114}] = nif_mod_call_history(),
 
     %% Module upgrade with different lib version
@@ -445,6 +475,7 @@ upgrade(Config) when is_list(Config) ->
     upgraded = call(Pid2,upgrade),
     false = check_process_code(Pid2, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,6,106}] = nif_mod_call_history(),
 
     2 = nif_mod:lib_version(),
@@ -471,6 +502,7 @@ upgrade(Config) when is_list(Config) ->
     upgraded = call(Pid2,upgrade),
     false = check_process_code(Pid2, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,2,6,206}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -484,6 +516,7 @@ upgrade(Config) when is_list(Config) ->
     {'DOWN', MRef2, process, Pid2, normal} = receive_any(),
     false= check_process_code(Pid2, nif_mod),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,4,104}] = nif_mod_call_history(),
 
     true = lists:member(?MODULE, erlang:system_info(taints)),
@@ -506,6 +539,7 @@ t_on_load(Config) when is_list(Config) ->
     ets:insert(nif_SUITE, {lib_version, 1}),
     API = proplists:get_value(nif_api_version, Config, ""),
     ets:insert(nif_SUITE, {nif_api_version, API}),
+    ets:insert(nif_SUITE, {tester, self()}),
     {module,nif_mod} = code:load_binary(nif_mod,File,Bin),
     hold_nif_mod_priv_data(nif_mod:get_priv_data_ptr()),
     [{load,1,1,101},{get_priv_data_ptr,1,2,102}] = nif_mod_call_history(),
@@ -523,6 +557,7 @@ t_on_load(Config) when is_list(Config) ->
     upgraded = call(Pid,upgrade),
     false = check_process_code(Pid, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,7,107}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -541,6 +576,7 @@ t_on_load(Config) when is_list(Config) ->
     upgraded = call(Pid,upgrade),
     false = check_process_code(Pid, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,12,112}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -554,6 +590,7 @@ t_on_load(Config) when is_list(Config) ->
     {'DOWN', MRef, process, Pid, normal} = receive_any(),
     false = check_process_code(Pid, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,14,114}] = nif_mod_call_history(),
 
     %% Module upgrade with different lib version
@@ -577,6 +614,7 @@ t_on_load(Config) when is_list(Config) ->
     upgraded = call(Pid2,upgrade),
     false = check_process_code(Pid2, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,6,106}] = nif_mod_call_history(),
 
     2 = nif_mod:lib_version(),
@@ -598,6 +636,7 @@ t_on_load(Config) when is_list(Config) ->
     upgraded = call(Pid2,upgrade),
     false = check_process_code(Pid2, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,2,6,206}] = nif_mod_call_history(),
 
     1 = nif_mod:lib_version(),
@@ -611,6 +650,7 @@ t_on_load(Config) when is_list(Config) ->
     {'DOWN', MRef2, process, Pid2, normal} = receive_any(),
     false= check_process_code(Pid2, nif_mod),
     true = code:soft_purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,4,104}] = nif_mod_call_history(),
 
     true = lists:member(?MODULE, erlang:system_info(taints)),
@@ -643,17 +683,18 @@ t_nifs_attrib(Config) when is_list(Config) ->
     {module,nif_mod} = code:load_binary(nif_mod,File,Bin1),
     {error, {bad_lib, "Function not declared as nif" ++ _}} =
         nif_mod:load_nif_lib(Config, 1),
+    verify_tmpmem(TmpMem),
     ok.
 
 
-%% Test erlang:load_nif/2 waiting for code_write_permission.
+%% Test erlang:load_nif/2 waiting for code_mod_permission.
 t_load_race(Config) ->
     Data = proplists:get_value(data_dir, Config),
     File = filename:join(Data, "nif_mod"),
     {ok,nif_mod,Bin} = compile:file(File, [binary,return_errors]),
     {module,nif_mod} = erlang:load_module(nif_mod,Bin),
     try
-        erts_debug:set_internal_state(code_write_permission, true),
+        erts_debug:set_internal_state(code_mod_permission, true),
         Papa = self(),
         spawn_link(fun() ->
                            ok = nif_mod:load_nif_lib(Config, 1),
@@ -662,7 +703,7 @@ t_load_race(Config) ->
         timer:sleep(100),
         timeout = receive_any(0)
     after
-        true = erts_debug:set_internal_state(code_write_permission, false)
+        true = erts_debug:set_internal_state(code_mod_permission, false)
     end,
 
     "NIF loaded" = receive_any(),
@@ -749,37 +790,80 @@ load_traced_nif(Config) when is_list(Config) ->
     {ok,nif_mod,Bin} = compile:file(File, [binary,return_errors]),
     {module,nif_mod} = erlang:load_module(nif_mod,Bin),
 
-    Tracee = spawn_link(fun Loop() -> receive {lib_version,ExpRet} ->
-                                              ExpRet = nif_mod:lib_version()
-                                      end,
-                                      Loop()
+    Tester = self(),
+    Tracee = spawn_link(fun Loop() ->
+                                {call_trace_me, Arg} = receive_any(),
+                                Ret = nif_mod:trace_me(Arg),
+                                Tester ! {returned, Ret},
+                                Loop()
                         end),
-    1 = erlang:trace_pattern({nif_mod,lib_version,0}, true, [local]),
-    1 = erlang:trace(Tracee, true, [call]),
+    CallTraceMe = fun(Arg) ->
+                          Tracee ! {call_trace_me, Arg},
+                          receive {returned, Ret} -> Ret end
+                  end,
+    ?line S1 = trace:session_create(load_traced_nif, self(), []),
+    ?line S2 = trace:session_create(load_traced_nif, self(), []),
+    ?line 1 = trace:process(S1, Tracee, true, [call]),
+    ?line 1 = trace:process(S2, Tracee, true, [call]),
 
-    Tracee ! {lib_version, undefined},
-    {trace, Tracee, call, {nif_mod,lib_version,[]}} = receive_any(1000),
+    %% Add first breakpoint
+    ?line 1 = trace:function(S1, {nif_mod,trace_me,1}, true, [local]),
 
-    ok = nif_mod:load_nif_lib(Config, 1),
+    ?line undefined = CallTraceMe(11),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[11]}} = receive_any(1000),
 
-    Tracee ! {lib_version, 1},
-    {trace, Tracee, call, {nif_mod,lib_version,[]}} = receive_any(1000),
+    ?line ok = nif_mod:load_nif_lib(Config, 1),
+
+    %% Add second breakpoint while NIF is still loading
+    %% (and 'orig_instr' in breakpoint is 'call_nif_early')
+    ?line 1 = trace:function(S2, {nif_mod,trace_me,1}, true, [local]),
+
+    ?line 1 = CallTraceMe(22),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[22]}} = receive_any(1000),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[22]}} = receive_any(1000),
 
     %% Wait for NIF loading to finish and write final call_nif instruction
     timer:sleep(500),
 
-    Tracee ! {lib_version, 1},
-    {trace, Tracee, call, {nif_mod,lib_version,[]}} = receive_any(1000),
+    ?line 1 = CallTraceMe(33),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[33]}} = receive_any(1000),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[33]}} = receive_any(1000),
 
-    true = erlang:delete_module(nif_mod),
-    true = erlang:purge_module(nif_mod),
+    %% Remove second added breakpoint
+    ?line trace:function(S2, {nif_mod,trace_me,1}, false, [local]),
+    ?line 1 = CallTraceMe(44),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[44]}} = receive_any(1000),
 
-    unlink(Tracee),
-    exit(Tracee, kill),
+    ?line timer:sleep(500), %% Wait for breakpoint to be unlinked
+    ?line 1 = CallTraceMe(55),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[55]}} = receive_any(1000),
+
+    %% Re-add second breakpoint
+    ?line trace:function(S2, {nif_mod,trace_me,1}, true, [local]),
+    ?line 1 = CallTraceMe(66),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[66]}} = receive_any(1000),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[66]}} = receive_any(1000),
+
+    %% Remove first added breakpoint
+    ?line trace:function(S1, {nif_mod,trace_me,1}, false, [local]),
+    ?line 1 = CallTraceMe(77),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[77]}} = receive_any(1000),
+
+    ?line timer:sleep(500), %% Wait for breakpoint to be unlinked
+    ?line 1 = CallTraceMe(88),
+    ?line {trace, Tracee, call, {nif_mod,trace_me,[88]}} = receive_any(1000),
+
+    ?line true = erlang:delete_module(nif_mod),
+    ?line true = erlang:purge_module(nif_mod),
+
+    ?line trace:session_destroy(S1),
+    ?line trace:session_destroy(S2),
+
+    ?line unlink(Tracee),
+    ?line exit(Tracee, kill),
 
     verify_tmpmem(TmpMem),
     ok.
-
 
 -define(ERL_NIF_SELECT_READ, (1 bsl 0)).
 -define(ERL_NIF_SELECT_WRITE, (1 bsl 1)).
@@ -923,6 +1007,7 @@ select_2(Flag, Ref1, Ref2, MSG_ENV) ->
 select_3() ->
     erlang:garbage_collect(),
     {_,_,2} = last_resource_dtor_call(),
+
     ok.
 
 receive_ready(R, Ref, IOatom) when is_reference(Ref) ->
@@ -931,6 +1016,177 @@ receive_ready(_, Msg, _) ->
     [Got] = flush(),
     {true,_,_} = {Got=:=Msg, Got, Msg}.
 
+select_scheduler(Config) ->
+    ensure_lib_loaded(Config),
+
+    RefBin = list_to_binary(lists:duplicate(100, $x)),
+
+    select_scheduler_do(0, make_ref(), null),
+    select_scheduler_do(?ERL_NIF_SELECT_CUSTOM_MSG, [a, "list", RefBin], null),
+    select_scheduler_do(?ERL_NIF_SELECT_CUSTOM_MSG, [a, "list", RefBin], alloc_env),
+
+    case has_scheduler_pollset() of
+        true ->
+            {ok, Peer, Node} = ?CT_PEER(#{ args => ["+IOs","false"]}),
+
+            erpc:call(Node, fun() ->
+                                    ensure_lib_loaded(Config),
+                                    select_scheduler_do(0, make_ref(), null),
+                                    select_scheduler_do(?ERL_NIF_SELECT_CUSTOM_MSG, [a, "list", RefBin], null),
+                                    select_scheduler_do(?ERL_NIF_SELECT_CUSTOM_MSG, [a, "list", RefBin], alloc_env)
+                            end),
+
+            peer:stop(Peer);
+        _ ->
+            ok
+    end.
+
+%% This testcase tests so that scheduler polling works as it should for NIFs
+select_scheduler_do(Flag, Ref, MSG_ENV) ->
+
+    OriginalSchedPollFds = get_scheduler_pollset_size(),
+    SchedulerFDs = case has_scheduler_pollset() of
+            true -> 1;
+            false -> 0
+    end,
+
+    {{R, _R_ptr}, {W, W_ptr}} = socketpair_nif(),
+    ok = write_nif(W, <<"hej">>),
+    <<"hej">> = read_nif(R, 3),
+
+    %% Fill the output buffers and setup a select
+    FullData = write_full(R, $a),
+    select_nif(R, ?ERL_NIF_SELECT_WRITE bor Flag, R, self(), Ref, MSG_ENV),
+
+    eagain = read_nif(R, 3),
+
+    %% Move FD to scheduler pollset
+    move_fd_to_scheduler_pollset(W, R, Flag, Ref, MSG_ENV),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+    
+    %% Write without select, means migrate back to poll thread
+    ok = write_nif(W, <<"hej">>),
+    %% Make sure schedulers sleeps, triggering migration back to poll thread
+    timer:sleep(10),
+    <<"hej">> = read_all_nif(R, 3),
+
+    ?assertEqual(OriginalSchedPollFds, get_scheduler_pollset_size()),
+
+    %% Move FD to scheduler pollset again
+    move_fd_to_scheduler_pollset(W, R, Flag, Ref, MSG_ENV),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+
+    %% Check that we get WRITE select event if read FullData
+    FullData = read_all_nif(W, byte_size(FullData)),
+    receive_ready(R, Ref, ready_output),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+
+    %% Check that we can do a WRITE select when READ is on scheduler pollset
+    FullDataAgain = write_full(R, $b),
+    select_nif(R, ?ERL_NIF_SELECT_WRITE bor Flag, R, self(), Ref, MSG_ENV),
+    FullDataAgain = read_nif(W, byte_size(FullDataAgain)),
+    receive_ready(R, Ref, ready_output),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+
+    %% Check that we can de-select on READ when in scheduler pollset
+    0 = select_nif(R, ?ERL_NIF_SELECT_READ bor Flag, R, self(), Ref, MSG_ENV),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+    ?ERL_NIF_SELECT_READ_CANCELLED =
+        select_nif(R, ?ERL_NIF_SELECT_READ bor ?ERL_NIF_SELECT_CANCEL, R, self(), Ref, MSG_ENV),
+    ?assertEqual(OriginalSchedPollFds + SchedulerFDs, get_scheduler_pollset_size()),
+    ok = write_nif(W, <<"hej">>),
+    <<"hej">> = read_all_nif(R, 3),
+    [] = flush(0),
+
+    %% Close write side, while read side is in scheduler pollset
+    check_stop_ret(select_nif(W, ?ERL_NIF_SELECT_STOP, W, null, Ref, null)),
+    [{fd_resource_stop, W_ptr, _}] = flush(),
+    {1, {W_ptr,_}} = last_fd_stop_call(),
+    true = is_closed_nif(W),
+    [] = flush(0),
+    0 = select_nif(R, ?ERL_NIF_SELECT_READ bor Flag, R, self(), Ref, MSG_ENV),
+    receive_ready(R, Ref, ready_input),
+    eof = read_nif(R,1),
+
+    check_stop_ret(select_nif(R, ?ERL_NIF_SELECT_STOP, R, null, Ref, null)),
+    [{fd_resource_stop, R_ptr, _}] = flush(),
+    {1, {R_ptr,_}} = last_fd_stop_call(),
+    true = is_closed_nif(R),
+    [] = flush(0),
+
+    ?assertEqual(OriginalSchedPollFds, get_scheduler_pollset_size()),
+
+    %% We setup 10 fds in parallel to make sure all end up in scheduler pollset
+    NumberOfFds = 10,
+    Parent = self(),
+    Pids = [spawn_monitor(fun() ->
+                link(Parent),
+                {{R1, _R1_ptr}, {W1, _W1_ptr}} = socketpair_nif(),
+                move_fd_to_scheduler_pollset(W1, R1, Flag, Ref, MSG_ENV),
+                Parent ! self(),
+                receive stop -> ok end,
+                check_stop_ret(select_nif(W1, ?ERL_NIF_SELECT_STOP, W1, null, Ref, null)),
+                check_stop_ret(select_nif(R1, ?ERL_NIF_SELECT_STOP, R1, null, Ref, null))
+            end) || _ <- lists:seq(1,NumberOfFds)],
+    [receive P -> ok end || {P, _} <- Pids],
+    ?assertEqual(OriginalSchedPollFds + NumberOfFds*SchedulerFDs, get_scheduler_pollset_size()),
+    [begin P ! stop, receive {'DOWN', Ref1, _, _, _} -> ok end end || {P, Ref1} <- Pids],
+
+    NumberOfClosedFds = NumberOfFds * 2,
+    %% Sleep a bit to let all callback trigger
+    timer:sleep(1000),
+    {NumberOfClosedFds, {_,_}} = last_fd_stop_call(),
+
+    timer:sleep(1000),
+
+    %% Sleep a bit to let the pollset clear out
+    ?assertEqual(OriginalSchedPollFds, get_scheduler_pollset_size()),
+
+    ok.
+
+move_fd_to_scheduler_pollset(W, R, Flag, Ref, MSG_ENV) ->
+    [begin
+        0 = select_nif(R,?ERL_NIF_SELECT_READ bor Flag, R,null,Ref,MSG_ENV),
+        Buf = integer_to_binary(I),
+        ok = write_nif(W, Buf),
+        %% NOTE: If the testcase gets stuck here while running rr, that is
+        %% because the rr looses events for some reason and does not deliver
+        %% them as it is supposed to... so you will have to use good old fashioned
+        %% printf debugging...
+        receive
+            {select, R, Ref, ready_input} ->
+                ok;
+            Msg when Ref =:= Msg ->
+                ok
+        end,
+        Buf = read_all_nif(R, byte_size(Buf))
+     end || I <- lists:seq(1,30)],
+     ok.
+
+read_all_nif(Fd, Count) ->
+    case read_nif(Fd, Count) of
+        Res when byte_size(Res) =:= Count ->
+            Res;
+        Res when byte_size(Res) < Count ->
+            <<Res/binary, (read_all_nif(Fd, Count - byte_size(Res)))/binary>>
+    end.
+
+has_scheduler_pollset() ->
+    lists:search(fun(PS) ->
+        proplists:get_value(fallback, PS) =:= false andalso
+        proplists:get_value(poll_threads, PS) =:= 0
+    end, erlang:system_info(check_io)) =/= false.
+get_scheduler_pollset_size() ->
+    CIO = erlang:system_info(check_io),
+    case lists:search(fun(PS) ->
+            proplists:get_value(fallback, PS) =:= false andalso
+            proplists:get_value(poll_threads, PS) =:= 0
+        end, CIO) of
+        {value, PS} ->
+            proplists:get_value(total_poll_set_size, PS);
+        false ->
+            0
+    end.
 
 select_error(Config) when is_list(Config) ->
     ensure_lib_loaded(Config),
@@ -1152,17 +1408,18 @@ monitor_process_c(Config) ->
     Pid = spawn_link(fun() ->
                              R_ptr = alloc_monitor_resource_nif(),
                              {0,Mon} = monitor_process_nif(R_ptr, self(), true, Papa),
+                             receive after 1000 -> ok end,
                              [R_ptr] = monitored_by(self()),
                              put(store, make_resource(R_ptr)),
                              ok = release_resource(R_ptr),
                              [] = last_resource_dtor_call(),
-                             Papa ! {self(), done, R_ptr, Mon},
+                             Papa ! {done, self(), R_ptr, Mon},
                              exit
                      end),
-    [{Pid, done, R_ptr, Mon1},
-     {monitor_resource_down, R_ptr, Pid, Mon2}] = flush(2),
+    {done, Pid, R_ptr1, Mon1} = receive {done,_,_,_}=DoneMsg -> DoneMsg end,
+    [{monitor_resource_down, R_ptr1, Pid, Mon2}] = flush(1),
     compare_monitors_nif(Mon1, Mon2),
-    {R_ptr, _, 1} = last_resource_dtor_call(),
+    {R_ptr1, _, 1} = last_resource_dtor_call(),
     ok.
 
 %% Test race of resource dtor called when monitored process is exiting
@@ -1194,7 +1451,7 @@ monitor_process_purge(Config) ->
 
     monitor_process_purge_do(Config, NifModBin, resource_dtor_A),
     erlang:garbage_collect(),
-    receive after 10 -> ok end,
+    receive unloaded -> ok end,
     [{{resource_dtor_A_v1,_},1,4,104},
      {unload,1,5,105}] = nif_mod_call_history(),
 
@@ -1202,7 +1459,7 @@ monitor_process_purge(Config) ->
     %% prevented NIF lib from being unloaded.
     monitor_process_purge_do(Config, NifModBin, null),
     erlang:garbage_collect(),
-    receive after 10 -> ok end,
+    receive unloaded -> ok end,
     [{unload,1,4,104}] = nif_mod_call_history(),
     ok.
 
@@ -1394,7 +1651,7 @@ t_dynamic_resource_call(Config) ->
     true = erlang:delete_module(nif_mod),
     true = erlang:purge_module(nif_mod),
 
-    receive after 10 -> ok end,
+    receive unloaded -> ok end,
     [{{resource_dtor_A_v1,_},1,2,102},
      {unload,1,3,103}] = nif_mod_call_history(),
 
@@ -1427,6 +1684,7 @@ dynamic_resource_call_do(Config, NifModBin) ->
 
     {0, 1002} = dynamic_resource_call(nif_mod, with_dyncall, R, 1000),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,3,103}] = nif_mod_call_history(),
 
     %% Upgrade resource type with missing dyncall implementation.
@@ -1438,7 +1696,10 @@ dynamic_resource_call_do(Config, NifModBin) ->
 
     {1, 1000} = dynamic_resource_call(nif_mod, with_dyncall, R, 1000),
     true = erlang:purge_module(nif_mod),
+    receive unloaded -> ok end,
     [{unload,2,2,202}] = nif_mod_call_history(),
+
+    keep_alive(R),
     ok.
 
 
@@ -1618,27 +1879,304 @@ test_make_sub_bin(Bin) ->
 %% Test enif_get_string
 get_string(Config) when is_list(Config) ->
     ensure_lib_loaded(Config, 1),
-    {7, <<"hejsan",0,_:3/binary>>} = string_to_bin("hejsan",10),
-    {7, <<"hejsan",0,_>>} = string_to_bin("hejsan",8),
-    {7, <<"hejsan",0>>} = string_to_bin("hejsan",7),
-    {-6, <<"hejsa",0>>} = string_to_bin("hejsan",6),
-    {-5, <<"hejs",0>>} = string_to_bin("hejsan",5),
-    {-1, <<0>>} = string_to_bin("hejsan",1),
-    {0, <<>>} = string_to_bin("hejsan",0),
-    {1, <<0>>} = string_to_bin("",1),
-    {0, <<>>} = string_to_bin("",0),
+    {7, <<"hejsan", 0, _:3/binary>>} = string_to_bin("hejsan", 10, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0, _>>} = string_to_bin("hejsan", 8, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0>>} = string_to_bin("hejsan", 7, ?ERL_NIF_LATIN1),
+    {-6, <<"hejsa", 0>>} = string_to_bin("hejsan", 6, ?ERL_NIF_LATIN1),
+    {-5, <<"hejs", 0>>} = string_to_bin("hejsan", 5, ?ERL_NIF_LATIN1),
+    {-1, <<0>>} = string_to_bin("hejsan", 1, ?ERL_NIF_LATIN1),
+    {0, <<>>} = string_to_bin("hejsan", 0, ?ERL_NIF_LATIN1),
+    {1, <<0>>} = string_to_bin("", 1, ?ERL_NIF_LATIN1),
+    {0, <<>>} = string_to_bin("", 0, ?ERL_NIF_LATIN1),
+    {6, <<"hallå", 0, _, _>>} = string_to_bin("hallå", 8, ?ERL_NIF_LATIN1),
+    {6, <<"hallå", 0, _>>} = string_to_bin("hallå", 7, ?ERL_NIF_LATIN1),
+    {6, <<"hallå", 0>>} = string_to_bin("hallå", 6, ?ERL_NIF_LATIN1),
+    {-5, <<"hall", 0>>} = string_to_bin("hallå", 5, ?ERL_NIF_LATIN1),
+    {-4, <<"hal", 0>>} = string_to_bin("hallå", 4, ?ERL_NIF_LATIN1),
+    {0, <<0, _, _>>} = string_to_bin("Ω", 3, ?ERL_NIF_LATIN1),
+    {0, <<0, _>>} = string_to_bin("Ω", 2, ?ERL_NIF_LATIN1),
+    {0, <<0>>} = string_to_bin("Ω", 1, ?ERL_NIF_LATIN1),
+    {0, <<>>} = string_to_bin("Ω", 0, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0, _:3/binary>>} = string_to_bin("hejsan", 10, ?ERL_NIF_UTF8),
+    {7, <<"hejsan", 0, _>>} = string_to_bin("hejsan", 8, ?ERL_NIF_UTF8),
+    {7, <<"hejsan", 0>>} = string_to_bin("hejsan", 7, ?ERL_NIF_UTF8),
+    {-6, <<"hejsa", 0>>} = string_to_bin("hejsan", 6, ?ERL_NIF_UTF8),
+    {-5, <<"hejs", 0>>} = string_to_bin("hejsan", 5, ?ERL_NIF_UTF8),
+    {-1, <<0>>} = string_to_bin("hejsan", 1, ?ERL_NIF_UTF8),
+    {0, <<>>} = string_to_bin("hejsan", 0, ?ERL_NIF_UTF8),
+    {1, <<0>>} = string_to_bin("", 1, ?ERL_NIF_UTF8),
+    {0, <<>>} = string_to_bin("", 0, ?ERL_NIF_UTF8),
+    {7, <<"hallå"/utf8, 0, _>>} = string_to_bin("hallå", 8, ?ERL_NIF_UTF8),
+    {7, <<"hallå"/utf8, 0>>} = string_to_bin("hallå", 7, ?ERL_NIF_UTF8),
+    {-5, <<"hall", 0, _>>} = string_to_bin("hallå", 6, ?ERL_NIF_UTF8),
+    {-5, <<"hall", 0>>} = string_to_bin("hallå", 5, ?ERL_NIF_UTF8),
+    {-4, <<"hal", 0>>} = string_to_bin("hallå", 4, ?ERL_NIF_UTF8),
+    {3, <<"Ω"/utf8, 0>>} = string_to_bin("Ω", 3, ?ERL_NIF_UTF8),
+    {-1, <<0, _>>} = string_to_bin("Ω", 2, ?ERL_NIF_UTF8),
+    {-1, <<0>>} = string_to_bin("Ω", 1, ?ERL_NIF_UTF8),
+    {0, <<>>} = string_to_bin("Ω", 0, ?ERL_NIF_UTF8),
+
+    {0, <<_:5/binary>>} = string_to_bin([-10], 5, ?ERL_NIF_LATIN1),
+    {0, <<_:5/binary>>} = string_to_bin([-10], 5, ?ERL_NIF_UTF8),
+    {0, <<_:5/binary>>} = string_to_bin([(-1 bsl 8) + $A], 5, ?ERL_NIF_LATIN1),
+    {0, <<_:5/binary>>} = string_to_bin([(-1 bsl 8) + $A], 5, ?ERL_NIF_UTF8),
+    ok.
+
+%% Test enif_get_string_length
+get_string_length(Config) when is_list(Config) ->
+    ensure_lib_loaded(Config, 1),
+    0 = string_length("", ?ERL_NIF_LATIN1),
+    6 = string_length("hejsan", ?ERL_NIF_LATIN1),
+    5 = string_length("hallå", ?ERL_NIF_LATIN1),
+    false = string_length("Ω", ?ERL_NIF_LATIN1),
+    false = string_length("hejsanΩ", ?ERL_NIF_LATIN1),
+    0 = string_length("", ?ERL_NIF_UTF8),
+    6 = string_length("hejsan", ?ERL_NIF_UTF8),
+    6 = string_length("hallå", ?ERL_NIF_UTF8),
+    2 = string_length("Ω", ?ERL_NIF_UTF8),
+    8 = string_length("hejsanΩ", ?ERL_NIF_UTF8),
+
+    false = string_length([-10], ?ERL_NIF_LATIN1),
+    false = string_length([-10], ?ERL_NIF_UTF8),
+    false = string_length([(-1 bsl 8) + $A], ?ERL_NIF_LATIN1),
+    false = string_length([(-1 bsl 8) + $A], ?ERL_NIF_UTF8),
     ok.
 
 %% Test enif_get_atom
 get_atom(Config) when is_list(Config) ->
     ensure_lib_loaded(Config, 1),
-    {7, <<"hejsan",0,_:3/binary>>} = atom_to_bin(hejsan,10),
-    {7, <<"hejsan",0,_>>} = atom_to_bin(hejsan,8),
-    {7, <<"hejsan",0>>} = atom_to_bin(hejsan,7),
-    {0, <<_:6/binary>>} = atom_to_bin(hejsan,6),
-    {0, <<>>} = atom_to_bin(hejsan,0),
-    {1, <<0>>} = atom_to_bin('',1),
-    {0, <<>>} = atom_to_bin('',0),
+    Char1ByteLatin1 = <<"a">>,
+    Longest1ByteLatin1AtomText = binary:copy(Char1ByteLatin1, 255),
+    Longest1ByteLatin1Atom = erlang:binary_to_atom(Longest1ByteLatin1AtomText, latin1),
+    Char2ByteLatin1 = <<"å">>,
+    Longest2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 255),
+    Longest2ByteLatin1Atom = erlang:binary_to_atom(Longest2ByteLatin1AtomText, latin1),
+    Char2ByteUtf8 = <<"å"/utf8>>,
+    Longest2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 255),
+    Longest2ByteUtf8Atom = erlang:binary_to_atom(Longest2ByteUtf8AtomText, utf8),
+    Char3ByteUtf8 = <<"ᛥ"/utf8>>,
+    Longest3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 255),
+    Longest3ByteUtf8Atom = erlang:binary_to_atom(Longest3ByteUtf8AtomText, utf8),
+    Char4ByteUtf8 = <<"𠜱"/utf8>>,
+    Longest4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 255),
+    Longest4ByteUtf8Atom = erlang:binary_to_atom(Longest4ByteUtf8AtomText, utf8),
+    {7, <<"hejsan", 0, _:3/binary>>} = atom_to_bin(hejsan, 10, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0, _>>} = atom_to_bin(hejsan, 8, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0>>} = atom_to_bin(hejsan, 7, ?ERL_NIF_LATIN1),
+    {0, <<_:6/binary>>} = atom_to_bin(hejsan, 6, ?ERL_NIF_LATIN1),
+    {0, <<>>} = atom_to_bin(hejsan, 0, ?ERL_NIF_LATIN1),
+    {1, <<0>>} = atom_to_bin('', 1, ?ERL_NIF_LATIN1),
+    {0, <<>>} = atom_to_bin('', 0, ?ERL_NIF_LATIN1),
+    {6, <<"hallå", 0, _>>} = atom_to_bin('hallå', 7, ?ERL_NIF_LATIN1),
+    {6, <<"hallå", 0>>} = atom_to_bin('hallå', 6, ?ERL_NIF_LATIN1),
+    {0, <<_:5/binary>>} = atom_to_bin('hallå', 5, ?ERL_NIF_LATIN1),
+    {0, <<_:3/binary>>} = atom_to_bin('Ω', 3, ?ERL_NIF_LATIN1),
+    {0, <<_:2/binary>>} = atom_to_bin('Ω', 2, ?ERL_NIF_LATIN1),
+    {0, <<_>>} = atom_to_bin('Ω', 1, ?ERL_NIF_LATIN1),
+    {256, <<Longest1ByteLatin1AtomText:255/bytes, 0>>} = atom_to_bin(Longest1ByteLatin1Atom, 256, ?ERL_NIF_LATIN1),
+    {256, <<Longest2ByteLatin1AtomText:255/bytes, 0>>} = atom_to_bin(Longest2ByteLatin1Atom, 256, ?ERL_NIF_LATIN1),
+    {256, <<Longest2ByteLatin1AtomText:255/bytes, 0, _:255/bytes>>} = atom_to_bin(Longest2ByteLatin1Atom, 511, ?ERL_NIF_LATIN1),
+    {256, <<Longest2ByteLatin1AtomText:255/bytes, 0>>} = atom_to_bin(Longest2ByteUtf8Atom, 256, ?ERL_NIF_LATIN1),
+    {256, <<Longest2ByteLatin1AtomText:255/bytes, 0, _:255/bytes>>} = atom_to_bin(Longest2ByteUtf8Atom, 511, ?ERL_NIF_LATIN1),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest3ByteUtf8Atom, 256, ?ERL_NIF_LATIN1),
+    {0, <<_:766/bytes>>} = atom_to_bin(Longest3ByteUtf8Atom, 766, ?ERL_NIF_LATIN1),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest4ByteUtf8Atom, 256, ?ERL_NIF_LATIN1),
+    {0, <<_:1021/bytes>>} = atom_to_bin(Longest4ByteUtf8Atom, 1021, ?ERL_NIF_LATIN1),
+    {7, <<"hejsan", 0, _:3/binary>>} = atom_to_bin(hejsan, 10, ?ERL_NIF_UTF8),
+    {7, <<"hejsan", 0, _>>} = atom_to_bin(hejsan, 8, ?ERL_NIF_UTF8),
+    {7, <<"hejsan", 0>>} = atom_to_bin(hejsan, 7, ?ERL_NIF_UTF8),
+    {0, <<_:6/binary>>} = atom_to_bin(hejsan, 6, ?ERL_NIF_UTF8),
+    {0, <<>>} = atom_to_bin(hejsan, 0, ?ERL_NIF_UTF8),
+    {1, <<0>>} = atom_to_bin('', 1, ?ERL_NIF_UTF8),
+    {0, <<>>} = atom_to_bin('', 0, ?ERL_NIF_UTF8),
+    {7, <<"hallå"/utf8, 0>>} = atom_to_bin('hallå', 7, ?ERL_NIF_UTF8),
+    {0, <<_:6/binary>>} = atom_to_bin('hallå', 6, ?ERL_NIF_UTF8),
+    {0, <<_:5/binary>>} = atom_to_bin('hallå', 5, ?ERL_NIF_UTF8),
+    {3, <<"Ω"/utf8, 0>>} = atom_to_bin('Ω', 3, ?ERL_NIF_UTF8),
+    {0, <<_:2/binary>>} = atom_to_bin('Ω', 2, ?ERL_NIF_UTF8),
+    {0, <<_>>} = atom_to_bin('Ω', 1, ?ERL_NIF_UTF8),
+    {256, <<Longest1ByteLatin1AtomText:255/bytes, 0>>} = atom_to_bin(Longest1ByteLatin1Atom, 256, ?ERL_NIF_UTF8),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest2ByteLatin1Atom, 256, ?ERL_NIF_UTF8),
+    {511, <<Longest2ByteUtf8AtomText:510/bytes, 0>>} = atom_to_bin(Longest2ByteLatin1Atom, 511, ?ERL_NIF_UTF8),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest2ByteUtf8Atom, 256, ?ERL_NIF_UTF8),
+    {511, <<Longest2ByteUtf8AtomText:510/bytes, 0>>} = atom_to_bin(Longest2ByteUtf8Atom, 511, ?ERL_NIF_UTF8),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest3ByteUtf8Atom, 256, ?ERL_NIF_UTF8),
+    {766, <<Longest3ByteUtf8AtomText:765/bytes, 0>>} = atom_to_bin(Longest3ByteUtf8Atom, 766, ?ERL_NIF_UTF8),
+    {0, <<_:256/bytes>>} = atom_to_bin(Longest4ByteUtf8Atom, 256, ?ERL_NIF_UTF8),
+    {1021, <<Longest4ByteUtf8AtomText:1020/bytes, 0>>} = atom_to_bin(Longest4ByteUtf8Atom, 1021, ?ERL_NIF_UTF8),
+    ok.
+
+%% Test enif_get_atom_length
+get_atom_length(Config) when is_list(Config) ->
+    ensure_lib_loaded(Config, 1),
+    Char1ByteLatin1 = <<"a">>,
+    Longest1ByteLatin1AtomText = binary:copy(Char1ByteLatin1, 255),
+    Longest1ByteLatin1Atom = erlang:binary_to_atom(Longest1ByteLatin1AtomText, latin1),
+    Char2ByteLatin1 = <<"å">>,
+    Longest2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 255),
+    Longest2ByteLatin1Atom = erlang:binary_to_atom(Longest2ByteLatin1AtomText, latin1),
+    Char2ByteUtf8 = <<"å"/utf8>>,
+    Longest2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 255),
+    Longest2ByteUtf8Atom = erlang:binary_to_atom(Longest2ByteUtf8AtomText, utf8),
+    Char3ByteUtf8 = <<"ᛥ"/utf8>>,
+    Longest3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 255),
+    Longest3ByteUtf8Atom = erlang:binary_to_atom(Longest3ByteUtf8AtomText, utf8),
+    Char4ByteUtf8 = <<"𠜱"/utf8>>,
+    Longest4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 255),
+    Longest4ByteUtf8Atom = erlang:binary_to_atom(Longest4ByteUtf8AtomText, utf8),
+    0 = atom_length('', ?ERL_NIF_LATIN1),
+    6 = atom_length('hejsan', ?ERL_NIF_LATIN1),
+    5 = atom_length('hallå', ?ERL_NIF_LATIN1),
+    false = atom_length('Ω', ?ERL_NIF_LATIN1),
+    false = atom_length('hejsanΩ', ?ERL_NIF_LATIN1),
+    255 = atom_length(Longest1ByteLatin1Atom, ?ERL_NIF_LATIN1),
+    255 = atom_length(Longest2ByteLatin1Atom, ?ERL_NIF_LATIN1),
+    255 = atom_length(Longest2ByteUtf8Atom, ?ERL_NIF_LATIN1),
+    false = atom_length(Longest3ByteUtf8Atom, ?ERL_NIF_LATIN1),
+    false = atom_length(Longest4ByteUtf8Atom, ?ERL_NIF_LATIN1),
+    0 = atom_length('', ?ERL_NIF_UTF8),
+    6 = atom_length('hejsan', ?ERL_NIF_UTF8),
+    6 = atom_length('hallå', ?ERL_NIF_UTF8),
+    2 = atom_length('Ω', ?ERL_NIF_UTF8),
+    8 = atom_length('hejsanΩ', ?ERL_NIF_UTF8),
+    255 = atom_length(Longest1ByteLatin1Atom, ?ERL_NIF_UTF8),
+    510 = atom_length(Longest2ByteLatin1Atom, ?ERL_NIF_UTF8),
+    510 = atom_length(Longest2ByteUtf8Atom, ?ERL_NIF_UTF8),
+    765 = atom_length(Longest3ByteUtf8Atom, ?ERL_NIF_UTF8),
+    1020 = atom_length(Longest4ByteUtf8Atom, ?ERL_NIF_UTF8),
+    ok.
+
+%% Test enif_make_new_atom_len
+make_new_atoms(Config) when is_list(Config) ->
+    ensure_lib_loaded(Config, 1),
+    Char1ByteAscii = <<"a">>,
+    Longest1ByteAsciiAtomText = binary:copy(Char1ByteAscii, 255),
+    TooLong1ByteAsciiAtomText = binary:copy(Char1ByteAscii, 256),
+    Longest1ByteLatin1Atom = erlang:binary_to_atom(Longest1ByteAsciiAtomText, latin1),
+    Char2ByteLatin1 = <<"å">>,
+    Longest2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 255),
+    TooLong2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 256),
+    Longest2ByteLatin1Atom = erlang:binary_to_atom(Longest2ByteLatin1AtomText, latin1),
+    Char2ByteUtf8 = <<"å"/utf8>>,
+    Longest2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 255),
+    TooLong2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 256),
+    Longest2ByteUtf8Atom = erlang:binary_to_atom(Longest2ByteUtf8AtomText, utf8),
+    Char3ByteUtf8 = <<"ᛥ"/utf8>>,
+    Longest3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 255),
+    TooLong3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 256),
+    Longest3ByteUtf8Atom = erlang:binary_to_atom(Longest3ByteUtf8AtomText, utf8),
+    Char4ByteUtf8 = <<"𠜱"/utf8>>,
+    Longest4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 255),
+    TooLong4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 256),
+    Longest4ByteUtf8Atom = erlang:binary_to_atom(Longest4ByteUtf8AtomText, utf8),
+    hejsan = make_new_atom(<<"hejsan">>, ?ERL_NIF_LATIN1),
+    'hallå' = make_new_atom(<<"hallå">>, ?ERL_NIF_LATIN1),
+    'Î©' = make_new_atom(<<"Ω"/utf8>>, ?ERL_NIF_LATIN1),
+    '' = make_new_atom(<<>>, ?ERL_NIF_LATIN1),
+    Longest1ByteAsciiAtom = make_new_atom(Longest1ByteAsciiAtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(TooLong1ByteAsciiAtomText, ?ERL_NIF_LATIN1),
+    Longest2ByteLatin1Atom = make_new_atom(Longest2ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(TooLong2ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(Longest2ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(TooLong2ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(Longest3ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(TooLong3ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(Longest4ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_new_atom(TooLong4ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    hejsan = make_new_atom(<<"hejsan"/utf8>>, ?ERL_NIF_UTF8),
+    'hallå' = make_new_atom(<<"hallå"/utf8>>, ?ERL_NIF_UTF8),
+    'Ω' = make_new_atom(<<"Ω"/utf8>>, ?ERL_NIF_UTF8),
+    '' = make_new_atom(<<>>, ?ERL_NIF_UTF8),
+    Longest1ByteAsciiAtom = make_new_atom(Longest1ByteAsciiAtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(TooLong1ByteAsciiAtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(Longest2ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(TooLong2ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    Longest2ByteUtf8Atom = make_new_atom(Longest2ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(TooLong2ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    Longest3ByteUtf8Atom = make_new_atom(Longest3ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(TooLong3ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    Longest4ByteUtf8Atom = make_new_atom(Longest4ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_new_atom(TooLong4ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    ok.
+
+%% Test enif_make_existing_atom_len
+make_existing_atoms(Config) when is_list(Config) ->
+    ensure_lib_loaded(Config, 1),
+    _Existing = [hejsan, 'hallå', 'Î©', 'Ω', ''],
+    Char1ByteLatin1 = <<"a">>,
+    Char1ByteLatin1NE = <<"u">>,
+    Longest1ByteLatin1AtomText = binary:copy(Char1ByteLatin1, 255),
+    Longest1ByteLatin1AtomTextNE = binary:copy(Char1ByteLatin1NE, 255),
+    TooLong1ByteLatin1AtomText = binary:copy(Char1ByteLatin1, 256),
+    Longest1ByteLatin1Atom = erlang:binary_to_atom(Longest1ByteLatin1AtomText, latin1),
+    Char2ByteLatin1 = <<"å">>,
+    Char2ByteLatin1NE = <<"ú">>,
+    Longest2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 255),
+    Longest2ByteLatin1AtomTextNE = binary:copy(Char2ByteLatin1NE, 255),
+    TooLong2ByteLatin1AtomText = binary:copy(Char2ByteLatin1, 256),
+    Longest2ByteLatin1Atom = erlang:binary_to_atom(Longest2ByteLatin1AtomText, latin1),
+    Char2ByteUtf8 = <<"å"/utf8>>,
+    Char2ByteUtf8NE = <<"ú"/utf8>>,
+    Longest2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 255),
+    Longest2ByteUtf8AtomTextNE = binary:copy(Char2ByteUtf8NE, 255),
+    TooLong2ByteUtf8AtomText = binary:copy(Char2ByteUtf8, 256),
+    Longest2ByteUtf8Atom = erlang:binary_to_atom(Longest2ByteUtf8AtomText, utf8),
+    Char3ByteUtf8 = <<"ᛥ"/utf8>>,
+    Char3ByteUtf8NE = <<"ᛤ"/utf8>>,
+    Longest3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 255),
+    Longest3ByteUtf8AtomTextNE = binary:copy(Char3ByteUtf8NE, 255),
+    TooLong3ByteUtf8AtomText = binary:copy(Char3ByteUtf8, 256),
+    Longest3ByteUtf8Atom = erlang:binary_to_atom(Longest3ByteUtf8AtomText, utf8),
+    Char4ByteUtf8 = <<"𠜱"/utf8>>,
+    Char4ByteUtf8NE = <<"𠴕"/utf8>>,
+    Longest4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 255),
+    Longest4ByteUtf8AtomTextNE = binary:copy(Char4ByteUtf8NE, 255),
+    TooLong4ByteUtf8AtomText = binary:copy(Char4ByteUtf8, 256),
+    Longest4ByteUtf8Atom = erlang:binary_to_atom(Longest4ByteUtf8AtomText, utf8),
+    hejsan = make_existing_atom(<<"hejsan">>, ?ERL_NIF_LATIN1),
+    'hallå' = make_existing_atom(<<"hallå">>, ?ERL_NIF_LATIN1),
+    'Î©' = make_existing_atom(<<"Ω"/utf8>>, ?ERL_NIF_LATIN1),
+    '' = make_existing_atom(<<>>, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(<<"hejsan1234">>, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(<<"hallå1234">>, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(<<"Ω1234"/utf8>>, ?ERL_NIF_LATIN1),
+    Longest1ByteLatin1Atom = make_existing_atom(Longest1ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest1ByteLatin1AtomTextNE, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(TooLong1ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    Longest2ByteLatin1Atom = make_existing_atom(Longest2ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest2ByteLatin1AtomTextNE, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(TooLong2ByteLatin1AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest2ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest2ByteUtf8AtomTextNE, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(TooLong2ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest3ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest3ByteUtf8AtomTextNE, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(TooLong3ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest4ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(Longest4ByteUtf8AtomTextNE, ?ERL_NIF_LATIN1),
+    0 = make_existing_atom(TooLong4ByteUtf8AtomText, ?ERL_NIF_LATIN1),
+    hejsan = make_existing_atom(<<"hejsan"/utf8>>, ?ERL_NIF_UTF8),
+    'hallå' = make_existing_atom(<<"hallå"/utf8>>, ?ERL_NIF_UTF8),
+    'Ω' = make_existing_atom(<<"Ω"/utf8>>, ?ERL_NIF_UTF8),
+    '' = make_existing_atom(<<>>, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(<<"hejsan1234"/utf8>>, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(<<"hallå1234"/utf8>>, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(<<"Ω1234"/utf8>>, ?ERL_NIF_UTF8),
+    Longest1ByteLatin1Atom = make_existing_atom(Longest1ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest1ByteLatin1AtomTextNE, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(TooLong1ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest2ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest2ByteLatin1AtomTextNE, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(TooLong2ByteLatin1AtomText, ?ERL_NIF_UTF8),
+    Longest2ByteUtf8Atom = make_existing_atom(Longest2ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest2ByteUtf8AtomTextNE, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(TooLong2ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    Longest3ByteUtf8Atom = make_existing_atom(Longest3ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest3ByteUtf8AtomTextNE, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(TooLong3ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    Longest4ByteUtf8Atom = make_existing_atom(Longest4ByteUtf8AtomText, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(Longest4ByteUtf8AtomTextNE, ?ERL_NIF_UTF8),
+    0 = make_existing_atom(TooLong4ByteUtf8AtomText, ?ERL_NIF_UTF8),
     ok.
 
 %% Test NIF maps handling.
@@ -1861,6 +2399,12 @@ resource_neg_do(TypeA) ->
     ResB= make_new_resource(TypeB, <<"Bobo">>),
     {'EXIT',{badarg,_}} = (catch get_resource(TypeA, ResB)),
     {'EXIT',{badarg,_}} = (catch get_resource(TypeB, ResA)),
+
+    %% Test init_resource_type fail outside load/upgrade
+    {0, ?RT_CREATE} = init_resource_type("in_vain", ?RT_CREATE),
+    {0, ?RT_TAKEOVER} = init_resource_type("Gold", ?RT_TAKEOVER),
+    {0, ?RT_CREATE bor ?RT_TAKEOVER} =
+        init_resource_type("Gold", ?RT_CREATE bor ?RT_TAKEOVER),
     ok.
 
 %% Test enif_make_resource_binary
@@ -1978,6 +2522,7 @@ resource_takeover(Config) when is_list(Config) ->
                               ]),
     ?CHECK([{upgrade,2,1,201}], nif_mod_call_history()),
     true = erlang:purge_module(nif_mod),
+    timeout = receive unloaded -> error after 10 -> timeout end,
     ?CHECK([], nif_mod_call_history()),  % BGX2 keeping lib loaded
 
     BinA2 = read_resource(0,A2),
@@ -1990,7 +2535,7 @@ resource_takeover(Config) when is_list(Config) ->
     ok = forget_resource(AN2),
     ?CHECK([], nif_mod_call_history()),    % no dtor
 
-    ok = forget_resource(BGX2),  % calling dtor in orphan library v1 still loaded
+    ok = forget_resource_unload(BGX2),  % calling dtor in orphan library v1 still loaded
     ?CHECK([{{resource_dtor_B_v1,BinBGX2},1,6,106}, {unload,1,7,107}],
            nif_mod_call_history()),
 
@@ -2038,12 +2583,13 @@ resource_takeover(Config) when is_list(Config) ->
     {NGZ1,_BinNGZ1} = make_resource(4,Holder,"NGZ1"),
 
     false = code:purge(nif_mod),
+    timeout = receive unloaded -> error after 10 -> timeout end,
     [] = nif_mod_call_history(),
 
     ok = forget_resource(NGY1),
     [] = nif_mod_call_history(),
 
-    ok = forget_resource(BGY1),  % calling dtor in orphan library v2 still loaded
+    ok = forget_resource_unload(BGY1),  % calling dtor in orphan library v2 still loaded
     [{{resource_dtor_B_v2,BinBGY1},2,8,208},{unload,2,9,209}] = nif_mod_call_history(),
 
     %% Module upgrade with other lib-version
@@ -2066,9 +2612,10 @@ resource_takeover(Config) when is_list(Config) ->
     %%false= check_process_code(Pid, nif_mod),
     false = code:purge(nif_mod),
     %% no unload here as we still have instances with destructors
+    timeout = receive unloaded -> error after 10 -> timeout end,
     [] = nif_mod_call_history(),
 
-    ok = forget_resource(BGZ1),  % calling dtor in orphan library v2 still loaded
+    ok = forget_resource_unload(BGZ1),  % calling dtor in orphan library v2 still loaded
     [{{resource_dtor_B_v2,BinBGZ1},2,10,210},{unload,2,11,211}] = nif_mod_call_history(),
 
     ok = forget_resource(NGZ1),
@@ -2166,9 +2713,11 @@ resource_takeover(Config) when is_list(Config) ->
     %% Test rolback after failed initial load
     %%
     false = code:purge(nif_mod),
+    receive unloaded -> ok end,
     [{unload,1,_,_}] = nif_mod_call_history(),
     true = code:delete(nif_mod),
     false = code:purge(nif_mod),
+    timeout = receive unloaded -> error after 10 -> timeout end,
     [] = nif_mod_call_history(),
 
 
@@ -2242,6 +2791,13 @@ read_resource(Type, {Holder,Id}) ->
 forget_resource({Holder,Id}) ->
     Holder ! {self(), forget, Id},
     {Holder, forget_ok, Id} = receive_any(),
+    erts_debug:set_internal_state(wait, aux_work),
+    ok.
+
+forget_resource_unload({Holder,Id}) ->
+    Holder ! {self(), forget, Id},
+    ok = receive_any_order([{Holder, forget_ok, Id},
+                            unloaded]),
     erts_debug:set_internal_state(wait, aux_work),
     ok.
 
@@ -3006,6 +3562,19 @@ receive_any(Timeout) ->
     receive M -> M
     after Timeout -> timeout end.
 
+receive_any_order([]) -> ok;
+receive_any_order(Expected) ->
+    M = receive_any(),
+    case lists:member(M, Expected) of
+        true ->
+            receive_any_order(lists:delete(M, Expected));
+        false ->
+            io:format("Expected any of ~p", Expected),
+            io:format("Received ~p", M),
+            ct:fail({unexpected, M})
+    end.
+
+
 flush() ->
     flush(1).
 
@@ -3448,7 +4017,7 @@ test_bit_distribution_fitness(Integers, BitSize) ->
 
     (FailureText =:= [] orelse ct:fail(FailureText)).
 
-nif_hash_result_bitsize(internal) -> 32;
+nif_hash_result_bitsize(internal) -> erlang:system_info(wordsize) * 8;
 nif_hash_result_bitsize(phash2) -> 27.
 
 unique(List) ->
@@ -3482,12 +4051,7 @@ random_sign() ->
     end.
 
 random_binary() ->
-    list_to_binary(random_bytes(rand:uniform(32) - 1)).
-
-random_bytes(0) ->
-    [];
-random_bytes(N) when N > 0 ->
-    [rand:uniform(256) - 1 | random_bytes(N - 1)].
+    rand:bytes(rand:uniform(32) - 1).
 
 random_pid() ->
     Processes = erlang:processes(),
@@ -3986,12 +4550,15 @@ hash_nif(_Type, _Term, _Salt) -> ?nif_stub.
 many_args_100(_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_) -> ?nif_stub.
 clone_bin(_) -> ?nif_stub.
 make_sub_bin(_,_,_) -> ?nif_stub.
-string_to_bin(_,_) -> ?nif_stub.
-atom_to_bin(_,_) -> ?nif_stub.    
+string_to_bin(_,_,_) -> ?nif_stub.
+string_length(_,_) -> ?nif_stub.
+atom_to_bin(_,_,_) -> ?nif_stub.
+atom_length(_,_) -> ?nif_stub.
 macros(_) -> ?nif_stub.
 tuple_2_list_and_tuple(_) -> ?nif_stub.
 iolist_2_bin(_) -> ?nif_stub.
 get_resource_type(_) -> ?nif_stub.
+init_resource_type(_,_) -> ?nif_stub.
 alloc_resource(_,_) -> ?nif_stub.
 make_resource(_) -> ?nif_stub.
 get_resource(_,_) -> ?nif_stub.
@@ -4003,6 +4570,8 @@ check_is(_,_,_,_,_,_,_,_,_,_,_) -> ?nif_stub.
 check_is_exception() -> ?nif_stub.
 length_test(_,_,_,_,_,_) -> ?nif_stub.
 make_atoms() -> ?nif_stub.
+make_new_atom(_,_) -> ?nif_stub.
+make_existing_atom(_,_) -> ?nif_stub.
 make_strings() -> ?nif_stub.
 make_new_resource_binary(_) -> ?nif_stub.
 send_list_seq(_,_) -> ?nif_stub.     
@@ -4038,6 +4607,7 @@ format_term_nif(_,_) -> ?nif_stub.
 select_nif(_,_,_,_,_,_) -> ?nif_stub.
 dupe_resource_nif(_) -> ?nif_stub.
 pipe_nif() -> ?nif_stub.
+socketpair_nif() -> ?nif_stub.
 write_nif(_,_) -> ?nif_stub.
 read_nif(_,_) -> ?nif_stub.
 close_nif(_) -> ?nif_stub.
