@@ -1,4 +1,4 @@
-#
+# SPDX-License-Identifier: Apache-2.0 OR LGPL-2.1-or-later
 # Copyright (C) 2004, Ericsson Telecommunications
 # Authors: Richard Carlsson, Bertil Karlsson
 #
@@ -26,7 +26,7 @@ INCLUDE=../include
 
 ERL_COMPILE_FLAGS += -pa $(EBIN) -pa ./ -I$(INCLUDE)
 
-ERL_COMPILE_FLAGS += +nowarn_shadow_vars +warn_unused_import #-Werror # +warn_missing_spec +warn_untyped_record
+ERL_COMPILE_FLAGS += +warn_deprecated_catch +nowarn_shadow_vars +warn_unused_import -Werror # +warn_missing_spec +warn_untyped_record
 
 SOURCES=erl_syntax.erl erl_prettypr.erl erl_syntax_lib.erl	\
 	erl_comment_scan.erl erl_recomment.erl epp_dodger.erl	\
@@ -73,6 +73,7 @@ $(EBIN)/%.$(EMULATOR):%.erl
 $(EBIN)/merl_transform.beam: $(EBIN)/merl.beam ./merl_transform.beam \
 			../include/merl.hrl $(EBIN)/erl_comment_scan.beam \
 			$(EBIN)/erl_syntax.beam $(EBIN)/erl_syntax_lib.beam
+	$(V_ERLC) -pa $(ERL_TOP)/lib/syntax_tools/src $(ERL_COMPILE_FLAGS) -o $(EBIN) merl_transform.erl
 ./merl_transform.beam: ./merl_transform.erl $(EBIN)/merl.beam \
 			../include/merl.hrl
 	$(V_ERLC) -DMERL_NO_TRANSFORM $(ERL_COMPILE_FLAGS) -o ./ $<

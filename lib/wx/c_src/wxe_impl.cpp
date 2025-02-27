@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2008-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2008-2023. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,10 @@
 #define private public
 #include <wx/dcbuffer.h>
 #undef private
+
+#ifdef HAVE_GLIB
+ #include <glib.h>
+#endif
 
 #include "wxe_impl.h"
 #include "wxe_events.h"
@@ -109,31 +113,67 @@ void meta_command(ErlNifEnv *env, int what, wxe_me_ref *mp) {
 void send_msg(const char * type, const wxString * msg) {
   WxeApp * app = (WxeApp *) wxTheApp;
   wxeReturn rt = wxeReturn(app->global_me, init_caller);
+  ErlNifEnv *env = enif_alloc_env();
+  rt.env = env;
   ERL_NIF_TERM emsg = enif_make_tuple3(rt.env,
                                        rt.make_atom((char *) "wxe_driver"),
                                        rt.make_atom((char *) type),
                                        rt.make(msg));
   rt.send(emsg);
+  enif_free_env(env);
 }
+
+void wx_print_term(ErlNifEnv * env, ERL_NIF_TERM t)
+{
+  if(enif_is_binary(env, t)) {
+    ErlNifBinary bin;
+    enif_inspect_binary(env, t, &bin);
+    if(bin.size > 128) {
+      enif_fprintf(stderr, "<<...LARGE BIN>");
+    } else {
+      enif_fprintf(stderr, "%T", t);
+    }
+  } else {
+    enif_fprintf(stderr, "%T", t);
+  }
+}
+
+
 
 void print_cmd(wxeCommand& event)
 {
   int i;
   wxe_fns_t *func = &wxe_fns[event.op];
   enif_fprintf(stderr, "  %T %d %s::%s(", event.caller, event.op, func->cname, func->fname);
-  for(i=0; i < event.argc-1; i++) {
-    enif_fprintf(stderr, "%T,", event.args[i]);
+  for(i=0; i < event.argc; i++) {
+    wx_print_term(event.env, event.args[i]);
+    if(i < event.argc - 1)
+      enif_fprintf(stderr, ", ");
   }
-  if(i > 0) {
-    enif_fprintf(stderr, "%T)\r\n", event.args[i]);
-  } else {
-    enif_fprintf(stderr, ")\r\n");
-  }
+  enif_fprintf(stderr, ")\r\n");
 }
+ 
 
 /* ************************************************************
  *  Init WxeApp the application emulator
  * ************************************************************/
+
+#ifdef HAVE_GLIB
+static GLogWriterOutput wxe_log_glib(GLogLevelFlags log_level,
+                                     const GLogField *fields,
+                                     gsize n_fields,
+                                     gpointer user_data)
+{
+  for (gsize i = 0; i < n_fields; i++) {
+    if(strcmp(fields[i].key, "MESSAGE") == 0) {
+      wxString msg;
+      msg.Printf(wxT("GTK: %s"), (char *) fields[i].value);
+      send_msg("debug", &msg);
+    }
+  }
+  return G_LOG_WRITER_HANDLED;
+}
+#endif
 
 bool WxeApp::OnInit()
 {
@@ -167,6 +207,10 @@ bool WxeApp::OnInit()
 		 (wxObjectEventFunction) (wxEventFunction) &WxeApp::dummy_close);
 #endif
 
+#ifdef HAVE_GLIB
+  g_log_set_writer_func(wxe_log_glib, NULL, NULL);
+#endif
+
   SetExitOnFrameDelete(false);
 
   enif_mutex_lock(wxe_status_m);
@@ -198,6 +242,18 @@ void WxeApp::MacNewFile() {
 void WxeApp::MacReopenApp() {
   wxString empty;
   send_msg("reopen_app", &empty);
+}
+
+// See: https://github.com/wxWidgets/wxWidgets/blob/v3.1.5/src/osx/cocoa/utils.mm#L76:L93
+bool WxeApp::OSXIsGUIApplication() {
+   char val_buf[8];
+   size_t val_len = 7;
+   int res = enif_getenv("WX_MACOS_NON_GUI_APP", val_buf, &val_len);
+   if (res == 0) {
+     return FALSE;
+   } else {
+     return TRUE;
+   }
 }
 #endif
 
@@ -435,19 +491,21 @@ void WxeApp::dispatch_cb(wxeFifo * batch, wxeMemEnv * memenv, ErlNifPid process)
             }
             enif_mutex_lock(wxe_batch_locker_m);
             last = batch->m_q.size();
-            if(wxe_idle_processed) {
-              // We have processed cmds inside dispatch()
-              // so the iterator may be wrong, restart from
-              // beginning of the queue
-              i = 0;
-            }
             break;
           }
           batch->DeleteCmd(event);
         } else {
         // enif_fprintf(stderr, "Ignore:"); event ? print_cmd(*event) : fprintf(stderr, "NULL\r\n");
       }
-      i++;
+      if(wxe_idle_processed) {
+        // We have processed cmds inside dispatch()
+        // so the iterator may be wrong, restart from
+        // beginning of the queue
+        i = 0;
+        wxe_idle_processed = 0;
+      } else {
+        i++;
+      }
     }
     // sleep until something happens
     // enif_fprintf(stderr, "\r\n%s:%d: %d: sleep sz %d (%d) it pos: %d\r\n", __FILE__, __LINE__, recurse_level,

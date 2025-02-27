@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
 {application, kernel,
  [
   {description, "ERTS  CXC 138 10"},
-  {vsn, "8.1.2"},
+  {vsn, "10.2.1"},
   {modules, [application,
 	     application_controller,
 	     application_master,
@@ -55,6 +55,8 @@
 	     inet6_udp,
 	     inet6_sctp,
 	     inet_config,
+             inet_epmd_dist,
+             inet_epmd_socket,
 	     inet_hosts,
 	     inet_gethost_native,
 	     inet_tcp_dist,
@@ -70,6 +72,7 @@
              logger_filters,
              logger_formatter,
              logger_h_common,
+             logger_handler,
              logger_handler_watcher,
              logger_olp,
              logger_proxy,
@@ -83,9 +86,10 @@
 	     os,
 	     ram_file,
 	     rpc,
-	     user,
 	     user_drv,
 	     user_sup,
+             prim_tty,
+             prim_tty_sighandler,
              disk_log,
              disk_log_1,
              disk_log_server,
@@ -102,6 +106,7 @@
              inet,
              inet_db,
              inet_dns,
+             inet_dns_tsig,
              inet_parse,
              inet_res,
              inet_tcp,
@@ -118,6 +123,7 @@
 	     seq_trace,
              socket,
 	     standard_error,
+             trace,
 	     wrap_log_reader]},
   {registered, [application_controller,
 		erl_reply,
@@ -152,9 +158,14 @@
   {applications, []},
   {env, [{logger_level, notice},
          {logger_sasl_compatible, false},
-         {shell_docs_ansi,auto}
+         {net_tickintensity, 4},
+         {net_ticktime, 60},
+         {prevent_overlapping_partitions, true},
+         {shell_docs_ansi,auto},
+         {shell_history_drop,[]}
         ]},
   {mod, {kernel, []}},
-  {runtime_dependencies, ["erts-@OTP-17714@", "stdlib-3.15", "sasl-3.0", "crypto-5.0"]}
- ]
+  {runtime_dependencies, ["erts-15.1", "stdlib-6.0",
+                          "sasl-3.0", "crypto-5.0"]}
+  ]
 }.

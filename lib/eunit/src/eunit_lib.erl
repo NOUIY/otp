@@ -27,6 +27,7 @@
 %% @doc Utility functions for eunit
 
 -module(eunit_lib).
+-moduledoc false.
 
 -include("eunit.hrl").
 -include("eunit_internal.hrl").
@@ -525,6 +526,7 @@ list_dir(Dir) ->
 trie_new() ->
     gb_trees:empty().
 
+-dialyzer({no_opaque_union, [trie_store/2]}).
 trie_store([_ | _], []) ->
     [];
 trie_store([E | Es], T) ->

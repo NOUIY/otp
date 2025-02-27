@@ -2,7 +2,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2002-2021. All Rights Reserved.
+# Copyright Ericsson AB 2002-2025. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@
 
 if [ X"$CONFIG_SUBTYPE" = X"win64" ]; then
     GCC="x86_64-w64-mingw32-gcc -m64"
+elif [ X"$CONFIG_SUBTYPE" = X"arm64" || X"$CONFIG_SUBTYPE" = X"x64_arm64" ]; then
+    GCC="aarch64-w64-mingw32-gcc -m64"
 else
     GCC="x86_64-w64-mingw32-gcc -m32"
 fi

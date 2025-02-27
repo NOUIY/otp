@@ -18,17 +18,17 @@ ASMJIT_BEGIN_SUB_NAMESPACE(a64)
 namespace InstInternal {
 
 #ifndef ASMJIT_NO_TEXT
-Error instIdToString(Arch arch, InstId instId, String& output) noexcept;
-InstId stringToInstId(Arch arch, const char* s, size_t len) noexcept;
+Error ASMJIT_CDECL instIdToString(InstId instId, String& output) noexcept;
+InstId ASMJIT_CDECL stringToInstId(const char* s, size_t len) noexcept;
 #endif // !ASMJIT_NO_TEXT
 
 #ifndef ASMJIT_NO_VALIDATION
-Error validate(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, ValidationFlags validationFlags) noexcept;
+Error ASMJIT_CDECL validate(const BaseInst& inst, const Operand_* operands, size_t opCount, ValidationFlags validationFlags) noexcept;
 #endif // !ASMJIT_NO_VALIDATION
 
 #ifndef ASMJIT_NO_INTROSPECTION
-Error queryRWInfo(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, InstRWInfo* out) noexcept;
-Error queryFeatures(Arch arch, const BaseInst& inst, const Operand_* operands, size_t opCount, CpuFeatures* out) noexcept;
+Error ASMJIT_CDECL queryRWInfo(const BaseInst& inst, const Operand_* operands, size_t opCount, InstRWInfo* out) noexcept;
+Error ASMJIT_CDECL queryFeatures(const BaseInst& inst, const Operand_* operands, size_t opCount, CpuFeatures* out) noexcept;
 #endif // !ASMJIT_NO_INTROSPECTION
 
 } // {InstInternal}

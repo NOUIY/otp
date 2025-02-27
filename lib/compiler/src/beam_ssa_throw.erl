@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2020-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2020-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@
 %%%
 
 -module(beam_ssa_throw).
+-moduledoc false.
 
 -export([module/2]).
 
@@ -56,7 +57,7 @@
 %% Per-module scan state
 -record(gst, {tlh_roots :: gb_trees:tree(#b_local{}, gb_sets:set(handler())),
               tlh_edges=#{} :: #{ #b_local{} => gb_sets:set(#b_local{}) },
-              throws=sets:new([{version, 2}]) :: sets:set(#b_local{})}).
+              throws=sets:new() :: sets:set(#b_local{})}).
 
 %% Per-function scan state
 -record(lst, {suitability=#{} :: #{ #b_var{} => suitability() },
@@ -166,20 +167,32 @@ si_is([#b_set{op=raw_raise,args=[_,_,Stacktrace]} | Is],
 si_is([#b_set{op=build_stacktrace,args=[Stacktrace]} | Is],
       Id, Lbl, Last, Lst, Gst) ->
     si_handler_end(Is, Id, Lbl, Last, Stacktrace, Lst, Gst);
+si_is([#b_set{op=MakeFun,args=[#b_local{}=Callee | _]} | _Is],
+      _Id, _Lbl, _Last, Lst, Gst)
+  when MakeFun =:= make_fun;
+       MakeFun =:= old_make_fun ->
+    #gst{tlh_roots = Roots0} = Gst,
+
+    %% Funs may be called from anywhere which may result in a throw escaping
+    %% the module, so we'll add an unsuitable top-level handler to all funs.
+    Handlers = case gb_trees:lookup(Callee, Roots0) of
+                    {value, Handlers0} -> gb_sets:add(unsuitable, Handlers0);
+                    none -> gb_sets:singleton(unsuitable)
+                end,
+    Roots = gb_trees:enter(Callee, Handlers, Roots0),
+
+    {Lst, Gst#gst{tlh_roots=Roots}};
 si_is([#b_set{op=call,
               dst=Dst,
               args=[#b_remote{mod=#b_literal{val=erlang},
                               name=#b_literal{val=throw},
-                              arity=1}, _Term]}],
-      Id, _Lbl, #b_ret{arg=Dst}, Lst, Gst) ->
+                              arity=1}, _Term]},
+       #b_set{op={succeeded,body},args=[Dst]}],
+      Id, _Lbl, #b_br{fail=?EXCEPTION_BLOCK}, Lst, Gst) ->
     %% Tail throw, handled by caller. We'll need to visit this function again.
     #gst{throws=Throws0} = Gst,
     Throws = sets:add_element(Id, Throws0),
     {Lst, Gst#gst{throws=Throws}};
-si_is([#b_set{op=call,dst=Dst,args=[#b_local{}=Callee | _]}],
-      Id, _Lbl, #b_ret{arg=Dst}, Lst, Gst) ->
-    %% Tail call, inherit our caller's handler.
-    {Lst, inherit_tlh(Id, Callee, Gst)};
 si_is([#b_set{op=call,dst=Dst,args=[#b_local{}=Callee | _]},
        #b_set{op={succeeded,body},args=[Dst]}],
       Id, _Lbl, #b_br{fail=?EXCEPTION_BLOCK}, Lst, Gst) ->
@@ -333,11 +346,12 @@ opt_is([#b_set{op=call,
                dst=Dst,
                args=[#b_remote{mod=#b_literal{val=erlang},
                                name=#b_literal{val=throw},
-                               arity=1}, _Term]}=I0],
-       #b_ret{arg=Dst}, Hs) ->
+                               arity=1}, _Term]}=I0,
+        #b_set{op={succeeded,body},args=[Dst]}=Succ],
+       #b_br{}, Hs) ->
     ThrownType = beam_ssa:get_anno(thrown_type, I0, any),
     I = opt_throw(Hs, ThrownType, I0),
-    [I];
+    [I, Succ];
 opt_is([I | Is], Last, Hs) ->
     [I | opt_is(Is, Last, Hs)];
 opt_is([], _Last, _Hs) ->
@@ -387,7 +401,7 @@ ois_1([], _Blocks, _Ts) ->
     true.
 
 ois_successors(#b_switch{fail=Fail,list=List}, _Ts) ->
-    Lbls = [Lbl || {_, Lbl} <- List],
+    Lbls = [Lbl || {_, Lbl} <:- List],
     [Fail | Lbls];
 ois_successors(#b_br{bool=Bool,succ=Succ,fail=Fail}, Ts) ->
     case beam_types:get_singleton_value(ois_get_type(Bool, Ts)) of
@@ -444,7 +458,7 @@ ois_is([#b_set{op={bif,is_list},dst=Dst,args=[Src]} | Is], Ts) ->
 ois_is([#b_set{op={bif,is_map},dst=Dst,args=[Src]} | Is], Ts) ->
     ois_type_test(Src, Dst, #t_map{}, Is, Ts);
 ois_is([#b_set{op={bif,is_number},dst=Dst,args=[Src]} | Is], Ts) ->
-    ois_type_test(Src, Dst, number, Is, Ts);
+    ois_type_test(Src, Dst, #t_number{}, Is, Ts);
 ois_is([#b_set{op={bif,is_tuple},dst=Dst,args=[Src]} | Is], Ts) ->
     ois_type_test(Src, Dst, #t_tuple{}, Is, Ts);
 ois_is([#b_set{op=is_nonempty_list,dst=Dst,args=[Src]} | Is], Ts) ->

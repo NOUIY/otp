@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2019-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2019-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -44,12 +44,10 @@
          client_auth_empty_cert_accepted/1,
          client_auth_empty_cert_rejected/0,
          client_auth_empty_cert_rejected/1,
-         client_auth_partial_chain/0,
-         client_auth_partial_chain/1,
-         client_auth_allow_partial_chain/0,
-         client_auth_allow_partial_chain/1,
-         client_auth_do_not_allow_partial_chain/0,
-         client_auth_do_not_allow_partial_chain/1,
+         client_auth_use_partial_chain/0,
+         client_auth_use_partial_chain/1,
+         client_auth_do_not_use_partial_chain/0,
+         client_auth_do_not_use_partial_chain/1,
          client_auth_partial_chain_fun_fail/0,
          client_auth_partial_chain_fun_fail/1,
          missing_root_cert_no_auth/0,
@@ -73,7 +71,7 @@
 %%--------------------------------------------------------------------
 %% Common Test interface functions -----------------------------------
 %%--------------------------------------------------------------------
-all() -> 
+all() ->
     [
      {group,  openssl_client}
     ].
@@ -81,27 +79,31 @@ all() ->
 groups() ->
     [
      {openssl_client, [], protocol_groups()},
-     {'tlsv1.3', [], tls_1_3_protocol_groups()},
+     {'tlsv1.3', [], transport_group()},
+     {transport_socket, [], tls_1_3_protocol_groups()},
      {'tlsv1.2', [], pre_tls_1_3_protocol_groups() ++ [{group, ecdsa}, {group, rsa_pss_rsae}, {group, rsa_pss_pss}]},
      {'tlsv1.1', [], pre_tls_1_3_protocol_groups()},
      {'tlsv1', [], pre_tls_1_3_protocol_groups()},
      {'dtlsv1.2', [], pre_tls_1_3_protocol_groups() ++ [{group, ecdsa}]},
      {'dtlsv1', [], pre_tls_1_3_protocol_groups()},
-     {rsa, [], all_version_tests()},
-     {ecdsa, [], all_version_tests()},
-     {dsa, [], all_version_tests()},
-     {rsa_1_3, [], all_version_tests() ++ tls_1_3_tests() ++ [unsupported_sign_algo_client_auth,
-                                                              unsupported_sign_algo_cert_client_auth]},
-     {rsa_pss_rsae, [], all_version_tests()},
-     {rsa_pss_pss, [], all_version_tests()},
-     {rsa_pss_rsae_1_3, [], all_version_tests() ++ tls_1_3_tests()},
-     {rsa_pss_pss_1_3, [], all_version_tests() ++ tls_1_3_tests()},
-     {ecdsa_1_3, [], all_version_tests() ++ tls_1_3_tests()},
-     {eddsa_1_3, [], all_version_tests() ++ tls_1_3_tests()}
+     {rsa, [parallel], all_version_tests()},
+     {ecdsa, [parallel], all_version_tests()},
+     {dsa, [parallel], all_version_tests()},
+     {rsa_1_3, [parallel],
+      all_version_tests() ++
+          tls_1_3_tests() ++
+          [unsupported_sign_algo_client_auth,
+           unsupported_sign_algo_cert_client_auth]},
+     {rsa_pss_rsae, [parallel], all_version_tests()},
+     {rsa_pss_pss, [parallel], all_version_tests()},
+     {rsa_pss_rsae_1_3, [parallel], all_version_tests() ++ tls_1_3_tests()},
+     {rsa_pss_pss_1_3, [parallel], all_version_tests() ++ tls_1_3_tests()},
+     {ecdsa_1_3, [parallel], all_version_tests() ++ tls_1_3_tests()},
+     {eddsa_1_3, [parallel], all_version_tests() ++ tls_1_3_tests()}
     ].
 
 protocol_groups() ->
-    case ssl_test_lib:openssl_sane_dtls() of 
+    case ssl_test_lib:openssl_sane_dtls() of
         true ->
             [{group, 'tlsv1.3'},
              {group, 'tlsv1.2'},
@@ -115,11 +117,14 @@ protocol_groups() ->
              {group, 'tlsv1.1'},
              {group, 'tlsv1'}
             ]
-     end. 
+     end.
 
 pre_tls_1_3_protocol_groups() ->
     [{group, rsa},
      {group, dsa}].
+
+transport_group() ->
+    [{group, transport_socket}].
 
 tls_1_3_protocol_groups() ->
     [{group, rsa_1_3},
@@ -144,32 +149,21 @@ all_version_tests() ->
      auth,
      client_auth_empty_cert_accepted,
      client_auth_empty_cert_rejected,
-     client_auth_partial_chain,
-     client_auth_allow_partial_chain,
-     client_auth_do_not_allow_partial_chain,
+     client_auth_use_partial_chain,
+     client_auth_do_not_use_partial_chain,
      client_auth_partial_chain_fun_fail,
      missing_root_cert_no_auth
     ].
 
-init_per_suite(Config) ->
-    catch crypto:stop(),
-    try crypto:start() of
-	ok ->
-            case ssl_test_lib:working_openssl_client() of
-                true ->
-                    ssl_test_lib:clean_start(),
-                    Config;
-                false ->
-                    {skip, "Broken OpenSSL s_client"}
-            end
-    catch _:_ ->
-            {skip, "Crypto did not start"}
+init_per_suite(Config0) ->
+    Config = ssl_test_lib:init_per_suite(Config0, openssl),
+    case ssl_test_lib:working_openssl_client(Config) of
+        true -> Config;
+        false -> throw({skip, "Broken OpenSSL s_client"})
     end.
 
-end_per_suite(_Config) ->
-    ssl:stop(),
-    application:unload(ssl),
-    application:stop(crypto).
+end_per_suite(Config) ->
+    ssl_test_lib:end_per_suite(Config).
 
 init_per_group(openssl_client, Config) ->
     [{client_type, openssl}, {server_type, erlang} | Config];
@@ -177,38 +171,39 @@ init_per_group(openssl_client, Config) ->
 init_per_group(Group, Config0) when Group == rsa;
                                     Group == rsa_1_3 ->
     Config = ssl_test_lib:make_rsa_cert(Config0),
-    COpts = proplists:get_value(client_rsa_opts, Config),
-    SOpts = proplists:get_value(server_rsa_opts, Config),
+    COpts = ssl_test_lib:ssl_options(client_rsa_opts, Config),
+    SOpts = ssl_test_lib:ssl_options(server_rsa_opts, Config),
     %% Make sure _rsa* suite is chosen by ssl_test_lib:start_server
     Version = ssl_test_lib:protocol_version(Config),
-    Ciphers = ssl_cert_tests:test_ciphers(fun(dhe_rsa) -> 
+    Ciphers = ssl_cert_tests:test_ciphers(fun(dhe_rsa) ->
                                                   true;
-                                             (ecdhe_rsa) -> 
+                                             (ecdhe_rsa) ->
                                                   true;
                                              (_) ->
-                                                  false 
-                                          end, Version), 
+                                                  false
+                                          end, Version),
     case Ciphers of
         [_|_] ->
             [{cert_key_alg, rsa} |
-             lists:delete(cert_key_alg,                                 
-                          [{client_cert_opts, [{ciphers, Ciphers} | COpts]}, 
-                           {server_cert_opts, SOpts} | 
-                           lists:delete(server_cert_opts, 
+             lists:delete(cert_key_alg,
+                          [{client_cert_opts, fun() -> [{ciphers, Ciphers} | COpts] end},
+                           {server_cert_opts, fun() -> SOpts end} |
+                           lists:delete(server_cert_opts,
                                         lists:delete(client_cert_opts, Config))])];
         [] ->
             {skip, {no_sup, Group, Version}}
     end;
-init_per_group(Alg, Config) when 
+init_per_group(Alg, Config) when
       Alg == rsa_pss_rsae;
       Alg == rsa_pss_pss;
       Alg == rsa_pss_rsae_1_3;
       Alg == rsa_pss_pss_1_3 ->
     Supports = crypto:supports(),
     RSAOpts = proplists:get_value(rsa_opts, Supports),
-    
-    case lists:member(rsa_pkcs1_pss_padding, RSAOpts) 
-        andalso lists:member(rsa_pss_saltlen, RSAOpts) 
+    Version = ssl_test_lib:n_version(proplists:get_value(version, Config)),
+
+    case lists:member(rsa_pkcs1_pss_padding, RSAOpts)
+        andalso lists:member(rsa_pss_saltlen, RSAOpts)
         andalso lists:member(rsa_mgf1_md, RSAOpts)
         andalso ssl_test_lib:is_sane_oppenssl_pss(rsa_alg(Alg))
     of
@@ -217,8 +212,8 @@ init_per_group(Alg, Config) when
               server_config := SOpts} = ssl_test_lib:make_rsa_pss_pem(rsa_alg(Alg), [], Config, ""),
             [{cert_key_alg, rsa_alg(Alg)} |
              lists:delete(cert_key_alg,
-                          [{client_cert_opts, openssl_sig_algs(Alg) ++ COpts},
-                           {server_cert_opts, sig_algs(rsa_alg(Alg)) ++ SOpts} |
+                          [{client_cert_opts, fun() -> openssl_sig_algs(rsa_alg(Alg)) ++ COpts end},
+                           {server_cert_opts, fun() -> ssl_test_lib:sig_algs(Alg, Version) ++ SOpts end} |
                            lists:delete(server_cert_opts,
                                         lists:delete(client_cert_opts, Config))])];
         false ->
@@ -227,30 +222,30 @@ init_per_group(Alg, Config) when
 init_per_group(Group, Config0) when Group == ecdsa;
                                     Group == ecdsa_1_3 ->
     PKAlg = crypto:supports(public_keys),
-    case lists:member(ecdsa, PKAlg) andalso (lists:member(ecdh, PKAlg) orelse 
-                                             lists:member(dh, PKAlg)) 
-        andalso (ssl_test_lib:openssl_ecdsa_suites() =/= []) 
+    case lists:member(ecdsa, PKAlg) andalso (lists:member(ecdh, PKAlg) orelse
+                                             lists:member(dh, PKAlg))
+        andalso (ssl_test_lib:openssl_ecdsa_suites() =/= [])
     of
         true ->
             Config = ssl_test_lib:make_ecdsa_cert(Config0),
-            COpts = proplists:get_value(client_ecdsa_opts, Config),
-            SOpts = proplists:get_value(server_ecdsa_opts, Config),
+            COpts = ssl_test_lib:ssl_options(client_ecdsa_opts, Config),
+            SOpts = ssl_test_lib:ssl_options(server_ecdsa_opts, Config),
             %% Make sure ecdh* suite is chosen by ssl_test_lib:start_server
             Version = ssl_test_lib:protocol_version(Config),
-            Ciphers =  ssl_cert_tests:test_ciphers(fun(ecdh_ecdsa) -> 
+            Ciphers =  ssl_cert_tests:test_ciphers(fun(ecdh_ecdsa) ->
                                                            true;
-                                                      (ecdhe_ecdsa) -> 
+                                                      (ecdhe_ecdsa) ->
                                                            true;
                                                       (_) ->
-                                                           false 
-                                                   end, Version), 
+                                                           false
+                                                   end, Version),
             case Ciphers of
                 [_|_] ->
                     [{cert_key_alg, ecdsa} |
                      lists:delete(cert_key_alg,
-                                  [{client_cert_opts, [{ciphers, Ciphers} | COpts]}, 
-                                   {server_cert_opts, SOpts} | 
-                                   lists:delete(server_cert_opts, 
+                                  [{client_cert_opts, fun() -> [{ciphers, Ciphers} | COpts] end},
+                                   {server_cert_opts, fun() -> SOpts end} |
+                                   lists:delete(server_cert_opts,
                                                 lists:delete(client_cert_opts, Config))]
                                  )];
                         [] ->
@@ -280,8 +275,8 @@ init_per_group(eddsa_1_3, Config0) ->
 
             [{cert_key_alg, eddsa} |
              lists:delete(cert_key_alg,
-                          [{client_cert_opts, COpts},
-                           {server_cert_opts, SOpts} |
+                          [{client_cert_opts, fun() -> COpts end},
+                           {server_cert_opts, fun() -> SOpts end} |
                            lists:delete(server_cert_opts,
                                         lists:delete(client_cert_opts, Config0))]
                          )];
@@ -290,42 +285,46 @@ init_per_group(eddsa_1_3, Config0) ->
     end;
 init_per_group(Group, Config0) when Group == dsa ->
     PKAlg = crypto:supports(public_keys),
-    case lists:member(dss, PKAlg) andalso lists:member(dh, PKAlg) 
-        andalso (ssl_test_lib:openssl_dsa_suites() =/= []) of
+    NVersion = ssl_test_lib:n_version(proplists:get_value(version, Config0)),
+    SigAlgs = ssl_test_lib:sig_algs(dsa, NVersion),
+    case lists:member(dss, PKAlg) andalso lists:member(dh, PKAlg)
+        andalso (ssl_test_lib:openssl_dsa_suites() =/= [])
+        andalso (ssl_test_lib:check_sane_openssl_dsa(Config0))
+    of
         true ->
-            Config = ssl_test_lib:make_dsa_cert(Config0),    
-            COpts = proplists:get_value(client_dsa_opts, Config),
-            SOpts = proplists:get_value(server_dsa_opts, Config),
+            Config = ssl_test_lib:make_dsa_cert(Config0),
+            COpts = SigAlgs ++ ssl_test_lib:ssl_options(client_dsa_opts, Config),
+            SOpts = SigAlgs ++ ssl_test_lib:ssl_options(server_dsa_opts, Config),
             %% Make sure dhe_dss* suite is chosen by ssl_test_lib:start_server
             Version = ssl_test_lib:protocol_version(Config),
-            Ciphers =  ssl_cert_tests:test_ciphers(fun(dh_dss) -> 
+            Ciphers =  ssl_cert_tests:test_ciphers(fun(dh_dss) ->
                                                            true;
-                                                      (dhe_dss) -> 
+                                                      (dhe_dss) ->
                                                            true;
                                                       (_) ->
-                                                           false 
-                                                   end, Version), 
+                                                           false
+                                                   end, Version),
             case Ciphers of
                 [_|_] ->
                     [{cert_key_alg, dsa} |
                      lists:delete(cert_key_alg,
-                                  [{client_cert_opts, [{ciphers, Ciphers} | COpts]}, 
-                                   {server_cert_opts, SOpts} | 
-                                   lists:delete(server_cert_opts, 
+                                  [{client_cert_opts, fun() -> [{ciphers, Ciphers} | COpts] end},
+                                   {server_cert_opts, fun() -> [{ciphers, Ciphers} | SOpts] end} |
+                                   lists:delete(server_cert_opts,
                                                 lists:delete(client_cert_opts, Config))])];
                 [] ->
                     {skip, {no_sup, Group, Version}}
             end;
         false ->
             {skip, "Missing DSS crypto support"}
-    end;    
+    end;
 init_per_group(GroupName, Config) ->
     ssl_test_lib:init_per_group_openssl(GroupName, Config).
 
 end_per_group(GroupName, Config) ->
     ssl_test_lib:end_per_group(GroupName, Config).
 
-init_per_testcase(TestCase, Config) when 
+init_per_testcase(TestCase, Config) when
       TestCase == client_auth_empty_cert_accepted;
       TestCase == client_auth_empty_cert_rejected ->
     Version = ssl_test_lib:protocol_version(Config),
@@ -336,7 +335,7 @@ init_per_testcase(TestCase, Config) when
             %% instead of sending EMPTY cert message in SSL-3.0 so empty cert test are not
             %% relevant
             {skip, openssl_behaves_differently};
-        _ -> 
+        _ ->
             ssl_test_lib:ct_log_supported_protocol_versions(Config),
             ct:timetrap({seconds, 30}),
             Config
@@ -346,7 +345,7 @@ init_per_testcase(_TestCase, Config) ->
     ct:timetrap({seconds, 30}),
     Config.
 
-end_per_testcase(_TestCase, Config) ->     
+end_per_testcase(_TestCase, Config) ->
     Config.
 
 %%--------------------------------------------------------------------
@@ -374,27 +373,102 @@ client_auth_empty_cert_rejected() ->
 client_auth_empty_cert_rejected(Config) ->
     ssl_cert_tests:client_auth_empty_cert_rejected(Config).
 %%--------------------------------------------------------------------
-client_auth_partial_chain() ->
-    ssl_cert_tests:client_auth_partial_chain().
-client_auth_partial_chain(Config) when is_list(Config) ->
-    ssl_cert_tests:client_auth_partial_chain(Config).
+%%  Have to use partial chain functionality on side running Erlang (we are not testing OpenSSL features)
+client_auth_use_partial_chain() ->
+    [{doc, "Server does not trust an intermediat CA and fails the connetion as ROOT has expired"}].
+client_auth_use_partial_chain(Config) when is_list(Config) ->
+    Prop = proplists:get_value(tc_group_properties, Config),
+    Group = proplists:get_value(name, Prop),
+    Version = proplists:get_value(version, Config),
+    Alg = proplists:get_value(cert_key_alg, Config),
+    DefaultCertConf = ssl_test_lib:default_ecc_cert_chain_conf(Group),
+    Ciphers = appropriate_ciphers(Group, Version),
+
+    {Year, Month, Day} = date(),
+    #{client_config := ClientOpts0,
+      server_config := ServerOpts0} = ssl_test_lib:make_cert_chains_pem(Alg,
+                                                                        [{client_chain,
+                                                                          [[{validity, {{Year-2, Month, Day},
+                                                                                        {Year-1, Month, Day}}}],
+                                                                           [],
+                                                                           []
+                                                                          ]},
+                                                                         {server_chain, DefaultCertConf}],
+                                                                        Config, "use_partial_chain"),
+    ClientOpts = ssl_test_lib:ssl_options(extra_client, ClientOpts0, Config),
+    CaCertsFile = proplists:get_value(cacertfile, ClientOpts),
+    ClientCACerts = [DerCA  ||  {'Certificate', DerCA, _} <- ssl_test_lib:pem_to_der(CaCertsFile)],
+    [_, IntermidiateCA, _] = ClientCACerts,
+    PartialChain =  fun(CertChain) ->
+			    case lists:member(IntermidiateCA, CertChain) of
+				true ->
+				    {trusted_ca, IntermidiateCA};
+				false ->
+				    unknown_ca
+			    end
+		    end,
+    ServerOpts = [{verify, verify_peer}, {fail_if_no_peer_cert, true}, {partial_chain, PartialChain} |
+                  ssl_test_lib:ssl_options(extra_server, [{ciphers, Ciphers} | ServerOpts0], Config)],
+    ssl_test_lib:basic_test(ClientOpts, ServerOpts, Config).
+%%--------------------------------------------------------------------
+%%  Have to use partial chain functionality on side running Erlang (we are not testing OpenSSL features)
+client_auth_do_not_use_partial_chain() ->
+   ssl_cert_tests:client_auth_do_not_use_partial_chain().
+client_auth_do_not_use_partial_chain(Config) when is_list(Config) ->
+    Prop = proplists:get_value(tc_group_properties, Config),
+    Group = proplists:get_value(name, Prop),
+    DefaultCertConf = ssl_test_lib:default_ecc_cert_chain_conf(Group),
+    Version = proplists:get_value(version, Config),
+    Alg = proplists:get_value(cert_key_alg, Config),
+    Ciphers = appropriate_ciphers(Group, Version),
+
+    {Year, Month, Day} = date(),
+    #{client_config := ClientOpts0,
+      server_config := ServerOpts0} = ssl_test_lib:make_cert_chains_pem(Alg,
+                                                                        [{client_chain,
+                                                                          [[{validity, {{Year-2, Month, Day},
+                                                                                        {Year-1, Month, Day}}}],
+                                                                           [],
+                                                                           []
+                                                                          ]},
+                                                                         {server_chain, DefaultCertConf}], Config, "do_not_use_partial_chain"),
+    PartialChain =  fun(_CertChain) ->
+			    unknown_ca
+		    end,
+    ClientOpts = ssl_test_lib:ssl_options(extra_client, ClientOpts0, Config),
+    ServerOpts = [{verify, verify_peer}, {fail_if_no_peer_cert, true}, {partial_chain, PartialChain} |
+                  ssl_test_lib:ssl_options(extra_server,  [{ciphers, Ciphers} | ServerOpts0], Config)],
+    ssl_test_lib:basic_alert(ClientOpts, ServerOpts, Config, certificate_expired).
 
 %%--------------------------------------------------------------------
-client_auth_allow_partial_chain() ->
-    ssl_cert_tests:client_auth_allow_partial_chain().
-client_auth_allow_partial_chain(Config) when is_list(Config) ->
-    ssl_cert_tests:client_auth_allow_partial_chain(Config).
-%%--------------------------------------------------------------------
-client_auth_do_not_allow_partial_chain() ->
-   ssl_cert_tests:client_auth_do_not_allow_partial_chain().
-client_auth_do_not_allow_partial_chain(Config) when is_list(Config) ->
-    ssl_cert_tests:client_auth_do_not_allow_partial_chain(Config).
-
-%%--------------------------------------------------------------------
+%%  Have to use partial chain functionality on side running Erlang (we are not testing OpenSSL features)
 client_auth_partial_chain_fun_fail() ->
    ssl_cert_tests:client_auth_partial_chain_fun_fail().
 client_auth_partial_chain_fun_fail(Config) when is_list(Config) ->
-    ssl_cert_tests:client_auth_partial_chain_fun_fail(Config).
+    Prop = proplists:get_value(tc_group_properties, Config),
+    Group = proplists:get_value(name, Prop),
+    DefaultCertConf = ssl_test_lib:default_ecc_cert_chain_conf(Group),
+    Version = proplists:get_value(version, Config),
+    Alg = proplists:get_value(cert_key_alg, Config),
+    Ciphers = appropriate_ciphers(Group, Version),
+
+    {Year, Month, Day} = date(),
+    #{client_config := ClientOpts0,
+      server_config := ServerOpts0} = ssl_test_lib:make_cert_chains_pem(Alg,
+                                                                        [{client_chain,
+                                                                          [[{validity, {{Year-2, Month, Day},
+                                                                                        {Year-1, Month, Day}}}],
+                                                                           [],
+                                                                           []
+                                                                          ]},
+                                                                         {server_chain, DefaultCertConf}], Config, "partial_chain_fun_fail"),
+    PartialChain = fun(_CertChain) ->
+                           error(crash_on_purpose)
+                   end,
+    ClientOpts = ssl_test_lib:ssl_options(extra_client, ClientOpts0, Config),
+    ServerOpts = [{verify, verify_peer}, {fail_if_no_peer_cert, true}, {partial_chain, PartialChain} |
+                  ssl_test_lib:ssl_options(extra_server,  [{ciphers, Ciphers} | ServerOpts0], Config)],
+    ssl_test_lib:basic_alert(ClientOpts, ServerOpts, Config, certificate_expired).
 
 %%--------------------------------------------------------------------
 missing_root_cert_no_auth() ->
@@ -445,15 +519,6 @@ rsa_alg(rsa_pss_pss_1_3) ->
 rsa_alg(Atom) ->
     Atom.
 
-sig_algs(rsa_pss_pss) ->
-    [{signature_algs, [rsa_pss_pss_sha512,
-                       rsa_pss_pss_sha384,
-                       rsa_pss_pss_sha256]}];
-sig_algs(rsa_pss_rsae) ->
-    [{signature_algs,[rsa_pss_rsae_sha512,
-                      rsa_pss_rsae_sha384,
-                      rsa_pss_rsae_sha256]}].
-
 openssl_sig_algs(rsa_pss_pss) ->
     [{sigalgs, "rsa_pss_pss_sha256"}];
 openssl_sig_algs(rsa_pss_rsae) ->
@@ -462,3 +527,8 @@ openssl_sig_algs(rsa_pss_pss_1_3) ->
     [{sigalgs, "rsa_pss_rsae_sha512:rsa_pss_rsae_sha384:rsa_pss_pss_sha256"}];
 openssl_sig_algs(rsa_pss_rsae_1_3) ->
     [{sigalgs,"rsa_pss_rsae_sha512:rsa_pss_rsae_sha384:rsa_pss_rsae_sha256"}].
+
+appropriate_ciphers(dsa, Version) ->
+    ssl:cipher_suites(all, Version);
+appropriate_ciphers(_, Version) ->
+    ssl:cipher_suites(default, Version).

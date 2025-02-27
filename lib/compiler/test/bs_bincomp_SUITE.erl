@@ -1,8 +1,8 @@
 %%
 %% %CopyrightBegin%
-%% 
-%% Copyright Ericsson AB 2006-2021. All Rights Reserved.
-%% 
+%%
+%% Copyright Ericsson AB 2006-2024. All Rights Reserved.
+%%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
 %% You may obtain a copy of the License at
@@ -14,7 +14,7 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%% 
+%%
 %% %CopyrightEnd%
 %%
 %% Originally based on Per Gustafsson's test suite.
@@ -22,24 +22,28 @@
 
 -module(bs_bincomp_SUITE).
 
--export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
+-export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1,
 	 init_per_group/2,end_per_group/2,
+         verify_highest_opcode/1,
 	 byte_aligned/1,bit_aligned/1,extended_byte_aligned/1,
 	 extended_bit_aligned/1,mixed/1,filters/1,trim_coverage/1,
 	 nomatch/1,sizes/1,general_expressions/1,
-         no_generator/1,zero_pattern/1,multiple_segments/1]).
+         no_generator/1,zero_pattern/1,multiple_segments/1,
+         grab_bag/1, strict_generators/1, float_skip/1]).
 
 -include_lib("common_test/include/ct.hrl").
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
 
-all() -> 
-    [byte_aligned, bit_aligned, extended_byte_aligned,
+all() ->
+    [verify_highest_opcode,
+     byte_aligned, bit_aligned, extended_byte_aligned,
      extended_bit_aligned, mixed, filters, trim_coverage,
      nomatch, sizes, general_expressions,
-     no_generator, zero_pattern, multiple_segments].
+     no_generator, zero_pattern, multiple_segments,
+     grab_bag, strict_generators, float_skip].
 
-groups() -> 
+groups() ->
     [].
 
 init_per_suite(Config) ->
@@ -54,6 +58,20 @@ init_per_group(_GroupName, Config) ->
 
 end_per_group(_GroupName, Config) ->
 	Config.
+
+verify_highest_opcode(_Config) ->
+    case ?MODULE of
+        bs_bincomp_r25_SUITE ->
+            {ok,Beam} = file:read_file(code:which(?MODULE)),
+            case test_lib:highest_opcode(Beam) of
+                Highest when Highest =< 180 ->
+                    ok;
+                TooHigh ->
+                    ct:fail({too_high_opcode,TooHigh})
+            end;
+        _ ->
+            ok
+    end.
 
 byte_aligned(Config) when is_list(Config) ->
     cs_init(),
@@ -149,7 +167,20 @@ mixed(Config) when is_list(Config) ->
     <<255>> = over_complex_generator(),
     {'EXIT',_} = catch float_segment_size(),
 
+    <<>> = inconsistent_types_1([]),
+    {'EXIT',{{bad_generator,42},_}} = catch inconsistent_types_1(42),
+    Self = self(),
+    {'EXIT',{{bad_generator,Self},_}} = catch inconsistent_types_1(Self),
+
+    {'EXIT',{{bad_filter,<<>>},_}} = catch inconsistent_types_2(),
+
+    %% Cover some code in beam_ssa_pre_codegen.
+    [] = fun(A) ->
+                 [] = [ok || <<A:A, _:(A bsr 1)>> <= A]
+         end(id(<<>>)),
+
     cs_end().
+
 
 mixed_nested(L) ->
     << << << << E:16 >> || E <- L >> || true >>/binary, 99:(id(8))>>.
@@ -220,6 +251,34 @@ float_segment_size() ->
             error
     end.
 
+%% GH-6468. Would crash in beam_ssa_bc_size:update_successors/3.
+inconsistent_types_1(X) ->
+    <<
+      X || _ <- X,
+           case is_pid(X) of
+               Y ->
+                   (#{
+                        ((not Y) andalso
+                         <<Y:(Y andalso X)>>) := Y
+                     } = X);
+               _ ->
+                   false
+           end
+    >>.
+
+%% GH-6468. Same type of crash.
+inconsistent_types_2() ->
+    <<
+      0 || case id([]) of
+               Y ->
+                   <<
+                     Y ||
+                       _ <- Y,
+                       (not ((false = Y) = (Y /= []))), (_ = Y)
+                   >>
+           end
+    >>.
+
 filters(Config) when is_list(Config) ->
     cs_init(),
     <<"BDF">> =
@@ -263,7 +322,7 @@ trim_coverage(Config) when is_list(Config) ->
     <<0,0,0,2,0,0,5,48,0,11,219,174,0,0,0,0>> = coverage_materialiv(a, b, {1328,777134}),
     <<67,40,0,0,66,152,0,0,69,66,64,0>> = coverage_trimmer([42,19,777]),
     <<0,0,2,43,0,0,3,9,0,0,0,3,64,8,0,0,0,0,0,0,
-	   64,68,0,0,0,0,0,0,192,171,198,0,0,0,0,0>> = 
+	   64,68,0,0,0,0,0,0,192,171,198,0,0,0,0,0>> =
 	coverage_lightfv(555, 777, {3.0,40.0,-3555.0}),
     <<"abcabc">> = coverage_strange(0, <<"abc">>),
     ok.
@@ -321,6 +380,14 @@ nomatch(Config) when is_list(Config) ->
     <<>> = nomatch_1(<<1,2,3>>, bad),
 
     <<>> = << <<>> || <<_:8>> <= <<>> >>,
+
+    %% GH-7494. Qualifiers should be evaluated from left to right. The
+    %% second (failing) generator should never be evaluated because the
+    %% first generator is an empty list.
+    <<>> = id(<< <<C:8>> || C <- [], _ <- ok >>),
+    <<>> = id(<<0 || _ <- [], _ <- ok, false>>),
+
+    {'EXIT',{{bad_generator,false},_}} = catch << [] || <<0:0>> <= false >>,
 
     ok.
 
@@ -588,6 +655,53 @@ do_multiple_segments_2(Gen) ->
     Bin = list_to_binary(List),
     List.
 
+grab_bag(_Config) ->
+    {'EXIT',{function_clause,_}} = catch grab_bag_gh_6553(<<>>),
+    {'EXIT',{function_clause,_}} = catch grab_bag_gh_6553(a),
+    {'EXIT',{{badmatch,<<>>},_}} = catch grab_bag_gh_6553(<<42>>),
+
+    %% Cover a line v3_kernel:get_line/1.
+    _ = catch << ok || <<>> <= ok, ok >>,
+
+    [] = grab_bag_gh_8617(<<>>),
+    [0] = grab_bag_gh_8617(<<1:1>>),
+    [0,0,0] = grab_bag_gh_8617(<<0:3>>),
+
+    ok.
+
+grab_bag_gh_6553(<<X>>) ->
+    %% Would crash in beam_ssa_pre_codegen.
+    <<X, ((<<_:0>> = <<_>>) = <<>>)>>.
+
+grab_bag_gh_8617(Bin) ->
+    %% GH-8617: CSE would cause a call self/0 to be inserted in
+    %% the middle of a sequence of `bs_match` instructions, causing
+    %% unsafe matching code to be emitted.
+    [0 || <<_:0, _:(tuple_size({self()}))>> <= Bin,
+          is_pid(id(self()))].
+
+strict_generators(_Config) ->
+    %% Basic strict generators (each generator type)
+    <<2,3,4>> = << <<(X+1)>> || X <:- [1,2,3]>>,
+    <<2,3,4>> = << <<(X+1)>> || <<X>> <:= <<1,2,3>> >>,
+    <<2,12>> = << <<(X*Y)>> || X := Y <:- #{1 => 2, 3 => 4} >>,
+
+    %% A failing guard following a strict generator is ok
+    <<3,4>> = << <<(X+1)>> || X <:- [1,2,3], X > 1>>,
+    <<3,4>> = << <<(X+1)>> || <<X>> <:= <<1,2,3>>, X > 1 >>,
+    <<12>> = << <<(X*Y)>> || X := Y <:- #{1 => 2, 3 => 4}, X > 1 >>,
+
+    %% Non-matching elements cause a badmatch error for strict generators
+    {'EXIT',{{badmatch,2},_}} = (catch << <<X>> || {ok, X} <:- [{ok,1},2,{ok,3}] >>),
+    {'EXIT',{{badmatch,<<128,2>>},_}} = (catch << <<X>> || <<0:1, X:7>> <:= <<1,128,2>> >>),
+    {'EXIT',{{badmatch,{2,error}},_}} = (catch << <<X>> || X := ok <:- #{1 => ok, 2 => error, 3 => ok} >>),
+
+    %% Extra bits cannot be skipped at the end of the binary either
+    {'EXIT',{{badmatch,<<0:2>>},_}} = (catch [X || <<X:3>> <:= <<0>>]),
+    {'EXIT',{{badmatch,<<9,2>>},_}} = (catch [Y || <<X, Y:X>> <:= <<8,1,9,2>>]),
+
+    ok.
+
 cs_init() ->
     erts_debug:set_internal_state(available_internal_state, true),
     ok.
@@ -599,11 +713,21 @@ cs_end() ->
 %% Verify that the allocated size is exact (rounded up to the nearest byte).
 cs(Bin) ->
     case ?MODULE of
+        bs_bincomp_cover_SUITE ->
+            ok;
         bs_bincomp_no_opt_SUITE ->
             ok;
         bs_bincomp_no_ssa_opt_SUITE ->
             ok;
+        bs_bincomp_no_copt_SUITE ->
+            ok;
+        bs_bincomp_no_copt_ssa_SUITE ->
+            ok;
         bs_bincomp_post_opt_SUITE ->
+            ok;
+        bs_bincomp_r25_SUITE ->
+            ok;
+        bs_bincomp_r26_SUITE ->
             ok;
         _ ->
             ByteSize = byte_size(Bin),
@@ -615,8 +739,17 @@ cs(Bin) ->
 %% Verify that the allocated size of the binary is the default size.
 cs_default(Bin) ->
     ByteSize = byte_size(Bin),
-    {refc_binary,ByteSize,{binary,256},_} = 
+    {refc_binary,ByteSize,{binary,256},_} =
 	erts_debug:get_internal_state({binary_info,Bin}),
     Bin.
+
+float_skip(Config) when is_list(Config) ->
+    BadFloat = <<-1:64>>,
+    [1.0,1.5,200.0] = [X || <<X:64/float>> <= <<BadFloat/binary,
+                        1:64/float, 1.5:64/float, 200:64/float>>],
+    [24.0,+48.5,21.0] =[X || <<X:64/float>> <= <<24:64/float,
+                        BadFloat/binary, 48.5:64/float, 21:64/float>>],
+    [a,a] =[a || <<0:64/float>> <= <<0:64/float, BadFloat/binary,
+                        0:64/float, 1.0:64/float>>].
 
 id(I) -> I.

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ suite() ->
      {timetrap,{minutes,1}}].
 
 all() -> 
-    All = case test_server:os_type() of
+    All = case os:type() of
               {unix, sunos} ->
                   [api, alarm1, alarm2, process, config, timeout,
                    unavailable, port];
@@ -551,7 +551,7 @@ timeout(Config) when is_list(Config) ->
 
     %% Linux should be handled the same way as solaris.
 
-    %    TimeoutMsg = case test_server:os_type() of
+    %    TimeoutMsg = case os:type() of
     %		     {unix, sunos} -> ext_collection_timeout;
     %		     {unix, linux} -> reg_collection_timeout
     %		 end,
@@ -758,6 +758,9 @@ improved_system_memory_data(Config) when is_list(Config) ->
                 _ ->
                     {comment, "No available_memory present in result"}
             end;
+        {unix,darwin} ->
+            true = AvailableMemoryPresent,
+            {comment, "available_memory present in result"};
         _ ->
             ok
     end.

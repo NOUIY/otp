@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1997-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1997-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -167,16 +167,8 @@ erts_cleanup_offheap_list(struct erl_off_heap_header* first)
 
     for (u.hdr = first; u.hdr; u.hdr = u.hdr->next) {
 	switch (thing_subtag(u.hdr->thing_word)) {
-	case REFC_BINARY_SUBTAG:
-            erts_bin_release(u.pb->val);
-	    break;
-	case FUN_SUBTAG:
-            /* We _KNOW_ that this is a local fun, otherwise it would not
-             * be part of the off-heap list. */
-            ASSERT(is_local_fun(u.fun));
-            if (erts_refc_dectest(&u.fun->entry.fun->refc, 0) == 0) {
-                erts_erase_fun_entry(u.fun->entry.fun);
-            }
+	case BIN_REF_SUBTAG:
+            erts_bin_release(u.br->val);
 	    break;
 	case REF_SUBTAG:
 	    ASSERT(is_magic_ref_thing(u.hdr));
@@ -278,14 +270,14 @@ erts_realloc_shrink_message(ErtsMessage *mp, Uint sz, Eterm *brefs, Uint brefs_s
 
 void
 erts_queue_dist_message(Process *rcvr,
-			ErtsProcLocks rcvr_locks,
-			ErtsDistExternal *dist_ext,
+                        ErtsProcLocks rcvr_locks,
+                        ErtsDistExternal *dist_ext,
                         ErlHeapFragment *hfrag,
-			Eterm token,
+                        Eterm token,
                         Eterm from)
 {
-    ErtsMessage* mp;
     erts_aint_t state;
+    ErtsMessage *mp;
 
     ERTS_LC_ASSERT(rcvr_locks == erts_proc_lc_my_proc_locks(rcvr));
 
@@ -320,40 +312,62 @@ erts_queue_dist_message(Process *rcvr,
 #endif
 	ERL_MESSAGE_TOKEN(mp) = token;
 
-    if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ)) {
-	if (erts_proc_trylock(rcvr, ERTS_PROC_LOCK_MSGQ) == EBUSY) {
-	    ErtsProcLocks need_locks = ERTS_PROC_LOCK_MSGQ;
-            ErtsProcLocks unlocks =
-                rcvr_locks & ERTS_PROC_LOCKS_HIGHER_THAN(ERTS_PROC_LOCK_MSGQ);
-	    if (unlocks) {
-		erts_proc_unlock(rcvr, unlocks);
-		need_locks |= unlocks;
-	    }
-	    erts_proc_lock(rcvr, need_locks);
-	}
+    /* If the sender is known, try to enqueue to an outer signal queue buffer
+     * instead of directly to the outer signal queue.
+     *
+     * Otherwise, the code below flushes the buffer before adding the message
+     * to ensure the signal order is maintained. This should only happen for
+     * the relatively uncommon DOP_SEND/DOP_SEND_TT operations. */
+    if (is_external_pid(from) &&
+         erts_proc_sig_queue_try_enqueue_to_buffer(from, rcvr, rcvr_locks,
+                                                   mp, &mp->next,
+                                                   NULL, 1)) {
+        return;
     }
 
+    if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ)) {
+        ErtsProcLocks unlocks;
+
+        unlocks = rcvr_locks & ERTS_PROC_LOCKS_HIGHER_THAN(ERTS_PROC_LOCK_MSGQ);
+        erts_proc_unlock(rcvr, unlocks);
+
+        erts_proc_sig_queue_lock(rcvr);
+    }
 
     state = erts_atomic32_read_acqb(&rcvr->state);
     if (state & ERTS_PSFLG_EXITING) {
-	if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ))
-	    erts_proc_unlock(rcvr, ERTS_PROC_LOCK_MSGQ);
-	/* Drop message if receiver is exiting or has a pending exit ... */
-	erts_cleanup_messages(mp);
-    }
-    else {
-	LINK_MESSAGE(rcvr, mp);
+        if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ)) {
+            erts_proc_unlock(rcvr, ERTS_PROC_LOCK_MSGQ);
+        }
 
-	if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ))
-	    erts_proc_unlock(rcvr, ERTS_PROC_LOCK_MSGQ);
+        /* Drop message if receiver is exiting or has a pending exit ... */
+        erts_cleanup_messages(mp);
+    } else {
+        if (state & ERTS_PSFLG_OFF_HEAP_MSGQ) {
+            /* Install buffers for the outer message if the heuristic
+             * indicates that this is beneficial. It is best to do this as
+             * soon as possible to avoid as much contention as possible. */
+            erts_proc_sig_queue_maybe_install_buffers(rcvr, state);
 
-	erts_proc_notify_new_message(rcvr, rcvr_locks);
+            /* Flush outer signal queue buffers, if such buffers are
+             * installed, to ensure that messages from the same
+             * process cannot be reordered. */
+            erts_proc_sig_queue_flush_buffers(rcvr);
+        }
+
+        LINK_MESSAGE(rcvr, mp, state);
+
+        if (!(rcvr_locks & ERTS_PROC_LOCK_MSGQ)) {
+            erts_proc_unlock(rcvr, ERTS_PROC_LOCK_MSGQ);
+        }
+
+        erts_proc_notify_new_message(rcvr, rcvr_locks);
     }
 }
 
 /* Add messages last in message queue */
 static void
-queue_messages(Process* sender, /* is NULL if the sender is not a local process */
+queue_messages(Eterm from,
                Process* receiver,
                ErtsProcLocks receiver_locks,
                ErtsMessage* first,
@@ -379,11 +393,11 @@ queue_messages(Process* sender, /* is NULL if the sender is not a local process 
                    == (receiver_locks & ERTS_PROC_LOCK_MSGQ));
 
     /*
-     * Try to enqueue to an outer message queue buffer instead of
-     * directly to the outer message queue
+     * Try to enqueue to an outer signal queue buffer instead of
+     * directly to the outer signal queue
      */
-    if (erts_proc_sig_queue_try_enqueue_to_buffer(sender, receiver, receiver_locks,
-                                                  first, last, NULL, len, 0)) {
+    if (erts_proc_sig_queue_try_enqueue_to_buffer(from, receiver, receiver_locks,
+                                                  first, last, NULL, len)) {
         return;
     }
 
@@ -427,10 +441,10 @@ queue_messages(Process* sender, /* is NULL if the sender is not a local process 
              */
             erts_proc_sig_queue_flush_buffers(receiver);
         }
-        LINK_MESSAGE(receiver, first);
+        LINK_MESSAGE(receiver, first, state);
     }
     else {
-        erts_enqueue_signals(receiver, first, last, NULL, len, state);
+        state = erts_enqueue_signals(receiver, first, last, len, state);
     }
 
     if (locked_msgq) {
@@ -481,7 +495,7 @@ erts_queue_message(Process* receiver, ErtsProcLocks receiver_locks,
     ERL_MESSAGE_TERM(mp) = msg;
     ERL_MESSAGE_FROM(mp) = from;
     ERL_MESSAGE_TOKEN(mp) = am_undefined;
-    queue_messages(NULL, receiver, receiver_locks, mp, &mp->next, 1);
+    queue_messages(from, receiver, receiver_locks, mp, &mp->next, 1);
 }
 
 /**
@@ -498,7 +512,7 @@ erts_queue_message_token(Process* receiver, ErtsProcLocks receiver_locks,
     ERL_MESSAGE_TERM(mp) = msg;
     ERL_MESSAGE_FROM(mp) = from;
     ERL_MESSAGE_TOKEN(mp) = token;
-    queue_messages(NULL, receiver, receiver_locks, mp, &mp->next, 1);
+    queue_messages(from, receiver, receiver_locks, mp, &mp->next, 1);
 }
 
 
@@ -517,9 +531,13 @@ erts_queue_proc_message(Process* sender,
                         Process* receiver, ErtsProcLocks receiver_locks,
                         ErtsMessage* mp, Eterm msg)
 {
+    if (sender == receiver)
+	(void) erts_atomic32_read_bor_nob(&sender->xstate,
+					  ERTS_PXSFLG_MAYBE_SELF_SIGS);
+
     ERL_MESSAGE_TERM(mp) = msg;
     ERL_MESSAGE_FROM(mp) = sender->common.id;
-    queue_messages(sender, receiver, receiver_locks,
+    queue_messages(sender->common.id, receiver, receiver_locks,
                    prepend_pending_sig_maybe(sender, receiver, mp),
                    &mp->next, 1);
 }
@@ -530,7 +548,11 @@ erts_queue_proc_messages(Process* sender,
                          Process* receiver, ErtsProcLocks receiver_locks,
                          ErtsMessage* first, ErtsMessage** last, Uint len)
 {
-    queue_messages(sender, receiver, receiver_locks,
+    if (sender == receiver)
+	(void) erts_atomic32_read_bor_nob(&sender->xstate,
+					  ERTS_PXSFLG_MAYBE_SELF_SIGS);
+
+    queue_messages(sender->common.id, receiver, receiver_locks,
                    prepend_pending_sig_maybe(sender, receiver, first),
                    last, len);
 }
@@ -632,6 +654,7 @@ erts_try_alloc_message_on_heap(Process *pp,
 	mp = erts_alloc_message(0, NULL);
 	mp->data.attached = NULL;
 	*on_heap_p = !0;
+        erts_adjust_memory_break(pp, -sz);
     }
     else if (pp && erts_proc_trylock(pp, ERTS_PROC_LOCK_MAIN) == 0) {
 	locked_main = 1;
@@ -947,6 +970,7 @@ void erts_save_message_in_proc(Process *p, ErtsMessage *msgp)
 	hfp = msgp->data.heap_frag;
     }
     else {
+        erts_adjust_message_break(p, ERL_MESSAGE_TERM(msgp));
 	erts_free_message(msgp);
 	return; /* Nothing to save */
     }
@@ -988,7 +1012,7 @@ change_off_heap_msgq(void *vcohmq)
      * process to complete this change itself.
      */
     cohmq = (ErtsChangeOffHeapMessageQueue *) vcohmq;
-    erts_proc_sig_send_move_msgq_off_heap(NULL, cohmq->pid);
+    erts_proc_sig_send_move_msgq_off_heap(cohmq->pid);
     erts_free(ERTS_ALC_T_MSGQ_CHNG, vcohmq);
 }
 
@@ -1115,6 +1139,10 @@ void erts_factory_proc_init(ErtsHeapFactory* factory, Process* p)
        heap as that completely destroys the DEBUG emulators
        performance. */
     ErlHeapFragment *bp = p->mbuf;
+
+    factory->heap_frags_saved = bp;
+    factory->heap_frags_saved_used = bp ? bp->used_size : 0;
+
     factory->mode     = FACTORY_HALLOC;
     factory->p        = p;
     factory->hp_start = HEAP_TOP(p);
@@ -1128,8 +1156,6 @@ void erts_factory_proc_init(ErtsHeapFactory* factory, Process* p)
     factory->message  = NULL;
     factory->off_heap_saved.first    = p->off_heap.first;
     factory->off_heap_saved.overhead = p->off_heap.overhead;
-    factory->heap_frags_saved = bp;
-    factory->heap_frags_saved_used = bp ? bp->used_size : 0;
     factory->heap_frags = NULL; /* not used */
     factory->alloc_type = 0; /* not used */
 
@@ -1142,6 +1168,13 @@ void erts_factory_proc_prealloc_init(ErtsHeapFactory* factory,
 				     Sint size)
 {
     ErlHeapFragment *bp = p->mbuf;
+
+    /* `heap_frags_saved_used` must be set _BEFORE_ we call `HAlloc`, as that
+     * may update `bp->used_size` and prevent us from undoing the changes later
+     * on. */
+    factory->heap_frags_saved = bp;
+    factory->heap_frags_saved_used = bp ? bp->used_size : 0;
+
     factory->mode     = FACTORY_HALLOC;
     factory->p        = p;
     factory->original_htop = HEAP_TOP(p);
@@ -1156,8 +1189,6 @@ void erts_factory_proc_prealloc_init(ErtsHeapFactory* factory,
     factory->message  = NULL;
     factory->off_heap_saved.first    = p->off_heap.first;
     factory->off_heap_saved.overhead = p->off_heap.overhead;
-    factory->heap_frags_saved = bp;
-    factory->heap_frags_saved_used = bp ? bp->used_size : 0;
     factory->heap_frags = NULL; /* not used */
     factory->alloc_type = 0; /* not used */
 }
@@ -1478,7 +1509,7 @@ void erts_factory_trim_and_close(ErtsHeapFactory* factory,
 	    /*else we don't trim multi fragmented messages for now (off_heap...) */
 	    break;
 	}
-	/* Fall through... */
+	ERTS_FALLTHROUGH();
     }
     case FACTORY_HEAP_FRAGS:
 	bp = factory->heap_frags;
@@ -1557,17 +1588,10 @@ void erts_factory_undo(ErtsHeapFactory* factory)
             ASSERT(factory->original_htop <= HEAP_LIMIT(factory->p));
             HEAP_TOP(factory->p) = factory->original_htop;
 
-
 	    /* Fix last heap frag */
             if (factory->heap_frags_saved) {
                 ASSERT(factory->heap_frags_saved == factory->p->mbuf);
-                if (factory->hp_start != factory->heap_frags_saved->mem)
-                    factory->heap_frags_saved->used_size = factory->heap_frags_saved_used;
-		else {
-                    factory->p->mbuf = factory->p->mbuf->next;
-                    ERTS_HEAP_FREE(ERTS_ALC_T_HEAP_FRAG, factory->heap_frags_saved,
-                                   ERTS_HEAP_FRAG_SIZE(factory->heap_frags_saved->alloc_size));
-                }
+                factory->heap_frags_saved->used_size = factory->heap_frags_saved_used;
             }
             if (factory->message) {
                 ASSERT(factory->message->data.attached != ERTS_MSG_COMBINED_HFRAG);

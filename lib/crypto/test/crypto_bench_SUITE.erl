@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2009-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2009-2025. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ groups() ->
 %%%----------------------------------------------------------------
 %%%
 init_per_suite(Config0) ->
-    try crypto:start() of
+    try application:start(crypto) of
         _ ->
             [{_,_,Info}] = crypto:info_lib(),
             ct:comment("~s",[Info]),

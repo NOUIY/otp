@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -80,7 +80,7 @@ groups() ->
 ssh_image_versions() ->
     try
         %% Find all useful containers in such a way that undefined command, too low
-        %% priviliges, no containers and containers found give meaningful result:
+        %% privileges, no containers and containers found give meaningful result:
         L0 = ["REPOSITORY"++_|_] = string:tokens(os:cmd("docker images"), "\r\n"),
         [["REPOSITORY","TAG"|_]|L1] = [string:tokens(E, " ") || E<-L0],
         [list_to_atom(V) || [?DOCKER_PFX,V|_] <- L1]
@@ -100,6 +100,7 @@ init_per_suite(Config) ->
                {skip, "No docker"};
            _ ->
                ssh:start(),
+               log_image_versions(ssh_image_versions(), Config),
                ct:log("Crypto info: ~p",[crypto:info_lib()]),
                ct:log("ssh image versions: ~p",[ssh_image_versions()]),
                Config
@@ -151,7 +152,7 @@ init_per_group(G, Config0) ->
                                     ct:comment("~s",[NewCmnt])
                             end,
                             AuthMethods =
-                                %% This should be obtained by quering the peer, but that
+                                %% This should be obtained by querying the peer, but that
                                 %% is a bit hard. It is possible with ssh_protocol_SUITE
                                 %% techniques, but it can wait.
                                 case Vssh of
@@ -409,7 +410,7 @@ send_recv_big_with_renegotiate_otp_is_client(Config) ->
     Data = << <<X:32>> || X <- lists:seq(1, HalfSizeBytes div 4)>>,
 
     %% Send the data. Must spawn a process to avoid deadlock. The client will block
-    %% until all is sent through the send window. But the server will stop receiveing
+    %% until all is sent through the send window. But the server will stop receiving
     %% when the servers send-window towards the client is full.
     %% Since the client can't receive before the server has received all but 655k from the client
     %% ssh_connection:send/4 is blocking...
@@ -875,7 +876,7 @@ new_dir(Config) ->
 
 %%--------------------------------------------------------------------
 %%
-%% Find the intersection of algoritms for otp ssh and the docker ssh.
+%% Find the intersection of algorithms for otp ssh and the docker ssh.
 %% Returns {ok, ServerHello, Server, ClientHello, Client} where Server are the algorithms common
 %% with the docker server and analogous for Client.
 %%
@@ -1097,7 +1098,7 @@ receive_hello(S, Ack) ->
 
 
 receive_kexinit(_S, <<PacketLen:32, PaddingLen:8, PayloadAndPadding/binary>>)
-  when PacketLen < 5000, % heuristic max len to stop huge attempts if packet decodeing get out of sync
+  when PacketLen < 5000, % heuristic max len to stop huge attempts if packet decoding get out of sync
        size(PayloadAndPadding) >= (PacketLen-1) % Need more bytes?
        ->
     ct:log("Has all ~p packet bytes",[PacketLen]),
@@ -1485,4 +1486,51 @@ renegotiate_test(Kex1, ConnectionRef) ->
         _ ->
             %% ct:log("Renegotiate test passed!",[]),
             ok
+    end.
+
+%%%----------------------------------------------------------------
+%% ImageVersions = ['dropbearv2016.72',
+%%                  'openssh4.4p1-openssl0.9.8c',
+%%                  ...
+%%                  'openssh8.8p1-openssl1.1.1l']
+
+log_image_versions(ImageVersions, Config) ->
+    case true == (catch
+                      lists:member({save_ssh_data,3},
+                                   ssh_collect_labmachine_info_SUITE:module_info(exports)))
+    of
+        true ->
+            HostPfx = hostname()++"_docker",
+            {_Imax, Entries} = lists:foldl(fix_entry(HostPfx), {0,[]}, ImageVersions),
+            ssh_collect_labmachine_info_SUITE:save_ssh_data(HostPfx, Entries, Config);
+        false ->
+            Config
+    end.
+
+
+fix_entry(HostPfx) ->
+    fun(E, {I,Acc}) ->
+            Entry =
+                [{hostname,           lists:flatten(io_lib:format("~s:~2..0w",[HostPfx,I]))},
+                 {type,               compat_test},
+                 {date,               date()},
+                 {time,               time()},
+                 {os_type,            os:type()},
+                 {os_version,         os:version()},
+                 {full_ssh_version,   fix_version(E)}
+                ],
+            {I+1, [Entry|Acc]}
+    end.
+
+fix_version(E) ->
+    case string:tokens(atom_to_list(E), "-") of
+        ["openssh"++Vs, "openssl"++Vc ] -> lists:concat(["OpenSSH_",Vs," OpenSSL ",Vc]);
+        ["openssh"++Vs, "libressl"++Vc] -> lists:concat(["OpenSSH_",Vs," LibreSSL ",Vc]);
+        _ -> atom_to_list(E)
+    end.
+
+hostname() ->
+    case inet:gethostname() of
+	{ok,Name} -> string:to_lower(Name);
+	_ -> "undefined"
     end.

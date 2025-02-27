@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2021. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -127,13 +127,16 @@ erts_atomic32_t erts_break_requested;
 
 
 /* set early so the break handler has access to initial mode */
-static struct termios initial_tty_mode;
+struct termios erl_sys_initial_tty_mode;
 static int replace_intr = 0;
 /* assume yes initially, ttsl_init will clear it */
 int using_oldshell = 1;
 
-UWord
-erts_sys_get_page_size(void)
+UWord sys_page_size;
+UWord sys_large_page_size;
+
+static UWord
+get_page_size(void)
 {
 #if defined(_SC_PAGESIZE)
     return (UWord) sysconf(_SC_PAGESIZE);
@@ -141,6 +144,25 @@ erts_sys_get_page_size(void)
     return (UWord) getpagesize();
 #else
     return (UWord) 4*1024; /* Guess 4 KB */
+#endif
+}
+
+static UWord
+get_large_page_size(void)
+{
+#ifdef HAVE_LINUX_THP
+    FILE *fp;
+    UWord result;
+    int matched;
+
+    fp = fopen("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", "r");
+    if (fp == NULL)
+        return 0;
+    matched = fscanf(fp, "%lu", &result);
+    fclose(fp);
+    return matched == 1 ? result : 0;
+#else
+    return 0;
 #endif
 }
 
@@ -160,8 +182,8 @@ void sys_tty_reset(int exit_code)
   if (using_oldshell && !replace_intr) {
     SET_BLOCKING(0);
   }
-  else if (isatty(0)) {
-    tcsetattr(0,TCSANOW,&initial_tty_mode);
+  else if (isatty(0) && isatty(1)) {
+    tcsetattr(0,TCSANOW,&erl_sys_initial_tty_mode);
   }
 }
 
@@ -230,6 +252,74 @@ thr_create_cleanup(void *vtcdp)
     erts_free(ERTS_ALC_T_TMP, tcdp);
 }
 
+#ifdef HAVE_LINUX_THP
+static int
+is_linux_thp_enabled(void)
+{
+    FILE *fp;
+    char always[9], madvise[10], never[8];
+    int matched;
+
+    fp = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+    if (fp == NULL)
+        return 0;
+    matched = fscanf(fp, "%8s %9s %7s", always, madvise, never);
+    fclose(fp);
+    if (matched != 3 || strcmp("[never]", never) == 0)
+        return 0;
+    return strcmp("[always]", always) != 0 || strcmp("[madvise]", madvise) != 0;
+}
+
+#define ALIGN_DOWN(x, a) ((void*)(((UWord)(x)) & ~((a) - 1)))
+
+static void
+enable_linux_thp_for_text(void)
+{
+    FILE *fp;
+    char *from, *to;
+    extern char etext;  /* see end(3) for details */
+
+    /*
+     * If sysfs(5) is not accessible we will not be able to determine the THP
+     * page size.  While we could madvise(2) the whole .text segment and just
+     * hope for the best, other things will likely go wrong so we simply fail
+     * fast instead.
+     */
+    if (sys_large_page_size == 0)
+        return;
+
+    /*
+     * Our use of madvise(... MADV_HUGEPAGE) only makes sense when the THP
+     * behavior is set to the default of [madvise].  Check that we are in this
+     * mode and exit if we are not.
+     */
+    if (is_linux_thp_enabled() == 0)
+        return;
+
+    fp = fopen("/proc/self/maps", "r");
+    if (fp == NULL)
+        return;
+
+    /*
+     * Iterate through the current process mappings to find the text segment.
+     * When they are found, madvise their memory region to use huge pages.
+     */
+    while (fscanf(fp, "%p-%p %*[^\n]\n", &from, &to) == 2) {
+        if (to < &etext)
+            continue;
+        if (from > &etext)
+            break;
+        if ((UWord)from % sys_large_page_size != 0)
+            break;
+        to = ALIGN_DOWN(to, sys_large_page_size);
+        if (to - from < sys_large_page_size)
+            break;
+        madvise(from, to - from, MADV_HUGEPAGE);
+    }
+    fclose(fp);
+}
+#endif
+
 static void
 thr_create_prepare_child(void *vtcdp)
 {
@@ -254,10 +344,14 @@ erts_sys_pre_init(void)
     /* Before creation in parent */
     eid.thread_create_prepare_func = thr_create_prepare;
     /* After creation in parent */
-    eid.thread_create_parent_func = thr_create_cleanup,
+    eid.thread_create_parent_func = thr_create_cleanup;
 
-    /* Must be done really early. */
-    sys_init_signal_stack();
+    sys_page_size = get_page_size();
+    sys_large_page_size = get_large_page_size();
+
+#ifdef HAVE_LINUX_THP
+    enable_linux_thp_for_text();
+#endif
 
 #ifdef ERTS_ENABLE_LOCK_COUNT
     erts_lcnt_pre_thr_init();
@@ -332,9 +426,8 @@ erl_sys_init(void)
     /* we save this so the break handler can set and reset it properly */
     /* also so that we can reset on exit (break handler or not) */
     if (isatty(0)) {
-	tcgetattr(0,&initial_tty_mode);
+	tcgetattr(0,&erl_sys_initial_tty_mode);
     }
-    tzset(); /* Required at least for NetBSD with localtime_r() */
 }
 
 /* signal handling */
@@ -342,12 +435,27 @@ erl_sys_init(void)
 SIGFUNC sys_signal(int sig, SIGFUNC func)
 {
     struct sigaction act, oact;
+    int extra_flags = 0;
 
     sigemptyset(&act.sa_mask);
-    act.sa_flags = 0;
+
+#if (defined(BEAMASM) && defined(NATIVE_ERLANG_STACK))
+    /* The JIT assumes that signals don't execute on the current stack (as our
+     * Erlang process stacks may be too small to execute a signal handler).
+     *
+     * Make sure the SA_ONSTACK flag is set when needed so that signals execute
+     * on their own signal-specific stack. */
+    if (func != SIG_DFL && func != SIG_IGN) {
+        extra_flags |= SA_ONSTACK;
+    }
+#endif
+
+    act.sa_flags = extra_flags;
     act.sa_handler = func;
+
     sigaction(sig, &act, &oact);
-    return(oact.sa_handler);
+
+    return oact.sa_handler;
 }
 
 #undef  sigprocmask
@@ -574,11 +682,13 @@ static RETSIGTYPE suspend_signal(int signum)
   SIGUSR1    Term     User-defined signal 1
   SIGUSR2    Term     User-defined signal 2
  !SIGCHLD    Ign      Child stopped or terminated
- !SIGCONT    Cont     Continue if stopped
+  SIGCONT    Cont     Continue if stopped
   SIGSTOP    Stop     Stop process
   SIGTSTP    Stop     Stop typed at terminal
  !SIGTTIN    Stop     Terminal input for background process
  !SIGTTOU    Stop     Terminal output for background process
+  SIGWINCH   Ign      Window size change
+  SIGINFO    Ign      Status request from keyboard
 */
 
 
@@ -599,6 +709,11 @@ signalterm_to_signum(Eterm signal)
     case am_sigchld: return SIGCHLD;
     case am_sigstop: return SIGSTOP;
     case am_sigtstp: return SIGTSTP;
+    case am_sigcont: return SIGCONT;
+    case am_sigwinch: return SIGWINCH;
+#ifdef SIGINFO
+    case am_siginfo: return SIGINFO;
+#endif /* defined(SIGINFO) */
     default:         return 0;
     }
 }
@@ -620,6 +735,11 @@ signum_to_signalterm(int signum)
     case SIGCHLD: return am_sigchld;
     case SIGSTOP: return am_sigstop;
     case SIGTSTP: return am_sigtstp;   /* ^z */
+    case SIGCONT: return am_sigcont;
+    case SIGWINCH: return am_sigwinch;
+#ifdef SIGINFO
+    case SIGINFO: return am_siginfo;  /* ^t */
+#endif /* defined(SIGINFO) */
     default:      return am_error;
     }
 }
@@ -651,12 +771,12 @@ void erts_set_ignore_break(void) {
      * typing certain key combinations at the
      * controlling terminal...
      */
-    sys_signal(SIGINT,  SIG_IGN);       /* Ctrl-C */
-    sys_signal(SIGQUIT, SIG_IGN);       /* Ctrl-\ */
-    sys_signal(SIGTSTP, SIG_IGN);       /* Ctrl-Z */
+    sys_signal(SIGINT,  SIG_IGN);       /* Ctrl+C */
+    sys_signal(SIGQUIT, SIG_IGN);       /* Ctrl+\ */
+    sys_signal(SIGTSTP, SIG_IGN);       /* Ctrl+Z */
 }
 
-/* Don't use ctrl-c for break handler but let it be 
+/* Don't use Ctrl+C for break handler but let it be
    used by the shell instead (see user_drv.erl) */
 void erts_replace_intr(void) {
   struct termios mode;
@@ -664,11 +784,11 @@ void erts_replace_intr(void) {
   if (isatty(0)) {
     tcgetattr(0, &mode);
 
-    /* here's an example of how to replace ctrl-c with ctrl-u */
+    /* here's an example of how to replace Ctrl+C with Ctrl+U */
     /* mode.c_cc[VKILL] = 0;
        mode.c_cc[VINTR] = CKILL; */
 
-    mode.c_cc[VINTR] = 0;	/* disable ctrl-c */
+    mode.c_cc[VINTR] = 0;	/* disable Ctrl+C */
     tcsetattr(0, TCSANOW, &mode);
     replace_intr = 1;
   }
@@ -781,7 +901,7 @@ void erts_do_break_handling(void)
     }
     else if (isatty(0)) {
       tcgetattr(0,&temp_mode);
-      tcsetattr(0,TCSANOW,&initial_tty_mode);
+      tcsetattr(0,TCSANOW,&erl_sys_initial_tty_mode);
       saved = 1;
     }
 
@@ -815,6 +935,10 @@ void sys_get_pid(char *buffer, size_t buffer_size){
     erts_snprintf(buffer, buffer_size, "%lu",(unsigned long) p);
 }
 
+int sys_get_hostname(char *buf, size_t size)
+{
+    return gethostname(buf, size);
+}
 
 void sys_init_io(void) { }
 void erts_sys_alloc_init(void) { }
@@ -1058,7 +1182,7 @@ init_smp_sig_notify(void)
 {
     erts_thr_opts_t thr_opts = ERTS_THR_OPTS_DEFAULT_INITER;
     thr_opts.detached = 1;
-    thr_opts.name = "sys_sig_dispatcher";
+    thr_opts.name = "erts_ssig_disp";
 
     if (pipe(sig_notify_fds) < 0) {
 	erts_exit(ERTS_ABORT_EXIT,
@@ -1108,7 +1232,7 @@ erts_sys_main_thread(void)
 #else
     /* Become signal receiver thread... */
 #ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_set_thread_name("signal_receiver");
+    erts_lc_set_thread_name("main");
 #endif
 #endif
     smp_sig_notify(0); /* Notify initialized */

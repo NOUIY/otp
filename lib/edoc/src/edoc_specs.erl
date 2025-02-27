@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 %% limitations under the License.
 %%
 %% %CopyrightEnd%
-
+%% @private
 %% @doc EDoc interface to Erlang specifications and types.
 
 -module(edoc_specs).
@@ -243,6 +243,7 @@ get_all_tags(Es) ->
 %% Turns an opaque type into an abstract datatype.
 %% Note: top level annotation is ignored.
 opaque2abstr(opaque, _T) -> undefined;
+opaque2abstr(nominal, T) -> T;
 opaque2abstr(record, T) -> T;
 opaque2abstr(type, T) -> T.
 
@@ -667,6 +668,7 @@ analyze_type_attribute(Form) ->
 -spec is_tag(Tag :: tag_kind() | term()) -> boolean().
 
 is_tag(callback) -> true;
+is_tag(nominal) -> true;
 is_tag(opaque) -> true;
 is_tag(spec) -> true;
 is_tag(type) -> true;
@@ -678,6 +680,7 @@ is_tag(_) -> false.
 -spec tag(Tag :: atom()) -> tag_kind() | unknown.
 
 tag(callback) -> callback;
+tag(nominal) -> type;
 tag(opaque) -> type;
 tag(spec) -> spec;
 tag(type) -> type;

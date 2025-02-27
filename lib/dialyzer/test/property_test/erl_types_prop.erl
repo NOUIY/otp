@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2020-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2020-2022. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -207,8 +207,9 @@ abstr() ->
 
 form_to_type(Form) ->
     Types = [SiteType | _] = types(),
+    Anno = erl_anno:new(0),
     TableTypes = [{{type, Type, 0},
-                   {{m, "file", {type, 0, any, []}, []}, any}} ||
+                   {{m, {"file", Anno}, {type, 0, any, []}, []}, any}} ||
                      Type <- Types],
     TypeTable = maps:from_list(TableTypes),
     CodeTable = ets:new(table, [set]),

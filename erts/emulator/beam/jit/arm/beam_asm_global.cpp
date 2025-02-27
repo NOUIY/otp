@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2020-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2020-2024. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@
  * %CopyrightEnd%
  */
 
+#define ERTS_BEAM_ASM_GLOBAL_WANT_STATIC_DEFS
 #include "beam_asm.hpp"
+#undef ERTS_BEAM_ASM_GLOBAL_WANT_STATIC_DEFS
 
 using namespace asmjit;
 
@@ -27,21 +29,6 @@ extern "C"
 #include "bif.h"
 #include "beam_common.h"
 }
-
-#define STRINGIFY_(X) #X
-#define STRINGIFY(X) STRINGIFY_(X)
-
-#define DECL_EMIT(NAME) {NAME, &BeamGlobalAssembler::emit_##NAME},
-const std::map<BeamGlobalAssembler::GlobalLabels, BeamGlobalAssembler::emitFptr>
-        BeamGlobalAssembler::emitPtrs = {BEAM_GLOBAL_FUNCS(DECL_EMIT)};
-#undef DECL_EMIT
-
-#define DECL_LABEL_NAME(NAME) {NAME, STRINGIFY(NAME)},
-
-const std::map<BeamGlobalAssembler::GlobalLabels, const std::string>
-        BeamGlobalAssembler::labelNames = {BEAM_GLOBAL_FUNCS(
-                DECL_LABEL_NAME) PROCESS_MAIN_LABELS(DECL_LABEL_NAME)};
-#undef DECL_LABEL_NAME
 
 BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
         : BeamAssembler("beam_asm_global") {
@@ -64,11 +51,13 @@ BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
     }
 
     {
-        /* We have no need of the module pointers as we use `getCode(...)` for
-         * everything. */
-        const void *_ignored_exec;
-        void *_ignored_rw;
-        _codegen(allocator, &_ignored_exec, &_ignored_rw);
+        const void *executable_region;
+        void *writable_region;
+
+        BeamAssembler::codegen(allocator, &executable_region, &writable_region);
+        VirtMem::flushInstructionCache((void *)executable_region,
+                                       code.codeSize());
+        VirtMem::protectJitMemory(VirtMem::ProtectJitAccess::kReadExecute);
     }
 
     std::vector<AsmRange> ranges;
@@ -85,15 +74,16 @@ BeamGlobalAssembler::BeamGlobalAssembler(JitAllocator *allocator)
             stop = (ErtsCodePtr)((char *)getBaseAddress() + code.codeSize());
         }
 
-        ranges.push_back({.start = start,
-                          .stop = stop,
-                          .name = code.labelEntry(labels[val.first])->name()});
+        ranges.push_back(AsmRange{start,
+                                  stop,
+                                  code.labelEntry(labels[val.first])->name(),
+                                  {}});
     }
 
-    beamasm_metadata_update("global",
-                            (ErtsCodePtr)getBaseAddress(),
-                            code.codeSize(),
-                            ranges);
+    (void)beamasm_metadata_insert("global",
+                                  (ErtsCodePtr)getBaseAddress(),
+                                  code.codeSize(),
+                                  ranges);
 
     /* `this->get_xxx` are populated last to ensure that we crash if we use
      * them instead of labels in global code. */
@@ -126,12 +116,17 @@ void BeamGlobalAssembler::emit_garbage_collect() {
     /* ARG2 is already loaded. */
     load_x_reg_array(ARG3);
     /* ARG4 (live registers) is already loaded. */
-    a.mov(ARG5, FCALLS);
-    runtime_call<5>(erts_garbage_collect_nobump);
-    a.sub(FCALLS, FCALLS, ARG1);
+    a.mov(ARG5.w(), FCALLS);
+    runtime_call<int (*)(Process *, Uint, Eterm *, int, int),
+                 erts_garbage_collect_nobump>();
+    a.sub(FCALLS, FCALLS, ARG1.w());
 
     emit_leave_runtime<Update::eStack | Update::eHeap | Update::eXRegs>();
     emit_leave_runtime_frame();
+
+    a.ldr(TMP1.w(), arm::Mem(c_p, offsetof(Process, state.value)));
+    a.tst(TMP1, imm(ERTS_PSFLG_EXITING));
+    a.b_ne(labels[do_schedule]);
 
     a.ret(a64::x30);
 }
@@ -165,8 +160,7 @@ void BeamGlobalAssembler::emit_bif_export_trap() {
  * ARG1 = export entry
  */
 void BeamGlobalAssembler::emit_export_trampoline() {
-    Label call_bif = a.newLabel(), error_handler = a.newLabel(),
-          jump_trace = a.newLabel();
+    Label call_bif = a.newLabel(), error_handler = a.newLabel();
 
     /* What are we supposed to do? */
     a.ldr(TMP1, arm::Mem(ARG1, offsetof(Export, trampoline.common.op)));
@@ -174,16 +168,13 @@ void BeamGlobalAssembler::emit_export_trampoline() {
     /* We test the generic bp first as it is most likely to be triggered in a
      * loop. */
     a.cmp(TMP1, imm(op_i_generic_breakpoint));
-    a.cond_eq().b(labels[generic_bp_global]);
+    a.b_eq(labels[generic_bp_global]);
 
     a.cmp(TMP1, imm(op_call_bif_W));
-    a.cond_eq().b(call_bif);
+    a.b_eq(call_bif);
 
     a.cmp(TMP1, imm(op_call_error_handler));
-    a.cond_eq().b(error_handler);
-
-    a.cmp(TMP1, imm(op_trace_jump_W));
-    a.cond_eq().b(jump_trace);
+    a.b_eq(error_handler);
 
     /* Must never happen. */
     a.udf(0xffff);
@@ -208,28 +199,25 @@ void BeamGlobalAssembler::emit_export_trampoline() {
         a.b(labels[call_bif_shared]);
     }
 
-    a.bind(jump_trace);
-    {
-        a.ldr(TMP1, arm::Mem(ARG1, offsetof(Export, trampoline.trace.address)));
-        a.br(TMP1);
-    }
-
     a.bind(error_handler);
     {
         emit_enter_runtime_frame();
-        emit_enter_runtime<Update::eReductions | Update::eStack |
-                           Update::eHeap | Update::eXRegs>();
+        emit_enter_runtime<Update::eReductions | Update::eHeapAlloc |
+                           Update::eXRegs>();
 
         lea(ARG2, arm::Mem(ARG1, offsetof(Export, info.mfa)));
         a.mov(ARG1, c_p);
         load_x_reg_array(ARG3);
         mov_imm(ARG4, am_undefined_function);
-        runtime_call<4>(call_error_handler);
+        runtime_call<
+                const Export
+                        *(*)(Process *, const ErtsCodeMFA *, Eterm *, Eterm),
+                call_error_handler>();
 
         /* If there is no error_handler, any number of X registers
          * can be live. */
-        emit_leave_runtime<Update::eReductions | Update::eStack |
-                           Update::eHeap | Update::eXRegs>();
+        emit_leave_runtime<Update::eReductions | Update::eHeapAlloc |
+                           Update::eXRegs>();
         emit_leave_runtime_frame();
 
         a.cbz(ARG1, labels[process_exit]);
@@ -249,19 +237,14 @@ void BeamModuleAssembler::emit_raise_exception() {
 void BeamModuleAssembler::emit_raise_exception(const ErtsCodeMFA *exp) {
     if (exp) {
         a.ldr(ARG4, embed_constant(exp, disp32K));
+        fragment_call(ga->get_raise_exception());
     } else {
-        a.mov(ARG4, ZERO);
+        fragment_call(ga->get_raise_exception_null_exp());
     }
 
-    fragment_call(ga->get_raise_exception());
-
-    /*
-     * It is important that error address is not equal to a line
-     * instruction that may follow this BEAM instruction. To avoid
-     * that, BeamModuleAssembler::emit() will emit a nop instruction
-     * if necessary.
-     */
-    last_error_offset = getOffset() & -8;
+    /* `line` instructions need to know the latest offset that may throw an
+     * exception. See the `line` instruction for details. */
+    last_error_offset = a.offset();
 }
 
 void BeamModuleAssembler::emit_raise_exception(Label I,
@@ -270,26 +253,36 @@ void BeamModuleAssembler::emit_raise_exception(Label I,
 
     if (exp) {
         a.ldr(ARG4, embed_constant(exp, disp32K));
+        a.b(resolve_fragment(ga->get_raise_exception_shared(), disp128MB));
     } else {
-        a.mov(ARG4, ZERO);
+        a.b(resolve_fragment(ga->get_raise_exception_null_exp(), disp128MB));
     }
-
-    a.b(resolve_fragment(ga->get_raise_exception_shared(), disp128MB));
 }
 
 void BeamGlobalAssembler::emit_process_exit() {
-    emit_enter_runtime();
+    emit_enter_runtime<Update::eHeapAlloc | Update::eReductions>();
 
     a.mov(ARG1, c_p);
     mov_imm(ARG2, 0);
     mov_imm(ARG4, 0);
     load_x_reg_array(ARG3);
-    runtime_call<4>(handle_error);
+    runtime_call<ErtsCodePtr (*)(Process *,
+                                 ErtsCodePtr,
+                                 Eterm *,
+                                 const ErtsCodeMFA *),
+                 handle_error>();
 
-    emit_leave_runtime();
+    emit_leave_runtime<Update::eHeapAlloc | Update::eReductions>();
 
     a.cbz(ARG1, labels[do_schedule]);
     a.udf(0xdead);
+}
+
+/* You must have already done emit_leave_runtime_frame()! */
+void BeamGlobalAssembler::emit_raise_exception_null_exp() {
+    a.mov(ARG4, ZERO);
+    a.mov(ARG2, a64::x30);
+    a.b(labels[raise_exception_shared]);
 }
 
 /* You must have already done emit_leave_runtime_frame()! */
@@ -309,18 +302,22 @@ void BeamGlobalAssembler::emit_raise_exception_shared() {
      * traces because it's equal to the error address. */
     a.str(ARG2, arm::Mem(E, -8).pre());
 
-    emit_enter_runtime<Update::eStack | Update::eHeap | Update::eXRegs>();
+    emit_enter_runtime<Update::eHeapAlloc | Update::eXRegs>();
 
     /* The error address must be a valid CP or NULL. */
     a.tst(ARG2, imm(_CPMASK));
-    a.cond_ne().b(crash);
+    a.b_ne(crash);
 
     /* ARG2 and ARG4 must be set prior to jumping here! */
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG3);
-    runtime_call<4>(handle_error);
+    runtime_call<ErtsCodePtr (*)(Process *,
+                                 ErtsCodePtr,
+                                 Eterm *,
+                                 const ErtsCodeMFA *),
+                 handle_error>();
 
-    emit_leave_runtime<Update::eStack | Update::eHeap | Update::eXRegs>();
+    emit_leave_runtime<Update::eHeapAlloc | Update::eXRegs>();
 
     a.cbz(ARG1, labels[do_schedule]);
 
@@ -338,7 +335,8 @@ void BeamModuleAssembler::emit_proc_lc_unrequire(void) {
 #ifdef ERTS_ENABLE_LOCK_CHECK
     a.mov(ARG1, c_p);
     mov_imm(ARG2, ERTS_PROC_LOCK_MAIN);
-    runtime_call<2>(erts_proc_lc_unrequire_lock);
+    runtime_call<void (*)(Process *, ErtsProcLocks),
+                 erts_proc_lc_unrequire_lock>();
 #endif
 }
 
@@ -346,7 +344,8 @@ void BeamModuleAssembler::emit_proc_lc_require(void) {
 #ifdef ERTS_ENABLE_LOCK_CHECK
     a.mov(ARG1, c_p);
     mov_imm(ARG2, ERTS_PROC_LOCK_MAIN);
-    runtime_call<4>(erts_proc_lc_require_lock);
+    runtime_call<void (*)(Process *, ErtsProcLocks, const char *, unsigned int),
+                 erts_proc_lc_require_lock>();
 #endif
 }
 

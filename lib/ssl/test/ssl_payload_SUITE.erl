@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2020. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2025. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
 -include_lib("common_test/include/ct.hrl").
 %% Common test
 -export([all/0,
@@ -112,15 +113,17 @@ all() ->
      {group, 'tlsv1.3'},
      {group, 'tlsv1.2'},
      {group, 'tlsv1.1'},
-     {group, 'tlsv1'}    
+     {group, 'tlsv1'},
+     {group, transport_socket}
     ].
 
 groups() ->
     [
-     {'tlsv1.3', [], payload_tests()},
-     {'tlsv1.2', [], payload_tests()},
-     {'tlsv1.1', [], payload_tests()},
-     {'tlsv1', [], payload_tests()}
+     {'tlsv1.3', [parallel], payload_tests()},
+     {'tlsv1.2', [parallel], payload_tests()},
+     {'tlsv1.1', [parallel], payload_tests()},
+     {'tlsv1', [parallel], payload_tests()},
+     {transport_socket, [parallel], payload_tests()}
     ].
 
 payload_tests() ->
@@ -151,8 +154,8 @@ payload_tests() ->
      client_active_once_server_close].
 
 init_per_suite(Config) ->
-    catch crypto:stop(),
-    try crypto:start() of
+    catch application:stop(crypto),
+    try application:start(crypto) of
 	ok ->
 	    ssl_test_lib:clean_start(),
             ssl_test_lib:make_rsa_cert(Config)
@@ -168,7 +171,7 @@ init_per_group(GroupName, Config) ->
     ssl_test_lib:init_per_group(GroupName, Config). 
 
 end_per_group(GroupName, Config) ->
-  ssl_test_lib:end_per_group(GroupName, Config).
+    ssl_test_lib:end_per_group(GroupName, Config).
 
 
 init_per_testcase(TestCase, Config)
@@ -792,40 +795,40 @@ send_close(Socket, Data) ->
     ssl:close(Socket).
 
 sender(Socket, Data) ->
-    ct:log("Sender recv: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Sender recv: ~p~n", [ssl:getopts(Socket, [active])]),
     send(Socket, Data, 100,
               fun() -> 
                       ssl_test_lib:recv_disregard(Socket, byte_size(Data)) 
               end).
 
 sender_active_once(Socket, Data) ->
-    ct:log("Sender active once: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Sender active once: ~p~n", [ssl:getopts(Socket, [active])]),
     send(Socket, Data, 100,
          fun() -> 
                  ssl_test_lib:active_once_disregard(Socket, byte_size(Data)) 
          end).
 
 sender_active(Socket, Data) ->
-    ct:log("Sender active: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Sender active: ~p~n", [ssl:getopts(Socket, [active])]),
     send(Socket, Data, 100,
          fun() -> 
                  ssl_test_lib:active_disregard(Socket, byte_size(Data)) 
          end).
 
 echoer(Socket, Size) ->
-    ct:log("Echoer recv: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Echoer recv: ~p~n", [ssl:getopts(Socket, [active])]),
     echo_recv(Socket, Size * 100).
 
 echoer_chunk(Socket, Size) ->
-    ct:log("Echoer recv: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Echoer recv: ~p~n", [ssl:getopts(Socket, [active])]),
     echo_recv_chunk(Socket, Size, Size * 100).
 
 echoer_active_once(Socket, Size) ->
-    ct:log("Echoer active once: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Echoer active once: ~p~n", [ssl:getopts(Socket, [active])]),
     echo_active_once(Socket, Size * 100).
 
 echoer_active(Socket, Size) ->
-    ct:log("Echoer active: ~p~n", [ssl:getopts(Socket, [active])]),
+    ?CT_LOG("Echoer active: ~p~n", [ssl:getopts(Socket, [active])]),
     echo_active(Socket, Size * 100).
 
 

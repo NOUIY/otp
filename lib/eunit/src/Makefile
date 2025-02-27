@@ -1,4 +1,4 @@
-#
+# SPDX-License-Identifier: Apache-2.0 OR LGPL-2.1-or-later
 # Copyright (C) 2008, Ericsson Telecommunications
 # Authors: Richard Carlsson, Bertil Karlsson
 #
@@ -25,7 +25,7 @@ EBIN = ../ebin
 INCLUDE=../include
 
 ERL_COMPILE_FLAGS += -pa $(EBIN) -pa ../../stdlib/ebin -I$(INCLUDE) \
-	+nowarn_shadow_vars +warn_unused_import -Werror
+	 +warn_deprecated_catch +nowarn_shadow_vars +warn_unused_import -Werror
 
 PARSE_TRANSFORM = eunit_autoexport.erl
 
@@ -121,7 +121,7 @@ release_spec: opt
 	$(INSTALL_DIR) "$(RELSYSDIR)/ebin"
 	$(INSTALL_DATA) $(PARSE_TRANSFORM_BIN) $(OBJECTS) "$(RELSYSDIR)/ebin"
 	$(INSTALL_DIR) "$(RELSYSDIR)/src"
-	$(INSTALL_DATA) $(PARSE_TRANSFORM) $(SOURCES) "$(RELSYSDIR)/src"
+	$(INSTALL_DATA) $(PARSE_TRANSFORM) $(SOURCES) $(BEHAVIOUR_SOURCES) "$(RELSYSDIR)/src"
 	$(INSTALL_DATA) $(INTERNAL_HRL_FILES) "$(RELSYSDIR)/src"
 	$(INSTALL_DIR) "$(RELSYSDIR)/include"
 	$(INSTALL_DATA) $(INCLUDE_DELIVERABLES) "$(RELSYSDIR)/include"

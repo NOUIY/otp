@@ -13,6 +13,7 @@
 %% limitations under the License.
 
 -module(dialyzer_clean_core).
+-moduledoc false.
 -export([clean/1]).
 
 -spec clean(cerl:cerl()) -> cerl:cerl().
@@ -109,6 +110,7 @@ clean_letrec(Tree) ->
       FunBody = cerl:fun_body(Fun),
       FunBody1 = clean(FunBody),
       Body = clean(cerl:letrec_body(Tree)),
+      FunVars = cerl:fun_vars(Fun),
       case dialyzer_ignore(Body) of
         true ->
           %% The body of the letrec directly transfer controls to
@@ -152,8 +154,10 @@ clean_letrec(Tree) ->
           %%    end
           %%
           PrimopUnknown = cerl:c_primop(cerl:abstract(dialyzer_unknown), []),
-          Clauses = [cerl:c_clause([cerl:abstract(a)], Body),
-                     cerl:c_clause([cerl:abstract(b)], FunBody1)],
+          PatA = [cerl:abstract(a)],
+          PatB = [cerl:c_tuple([cerl:abstract(b)|FunVars])],
+          Clauses = [cerl:c_clause(PatA, Body),
+                     cerl:c_clause(PatB, FunBody1)],
           cerl:c_case(PrimopUnknown, Clauses)
       end;
     false ->

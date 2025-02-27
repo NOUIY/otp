@@ -14,6 +14,8 @@
 #include "../core/radefs_p.h"
 #include "../x86/x86emithelper_p.h"
 #include "../x86/x86emitter.h"
+#include "../x86/x86formatter_p.h"
+#include "../x86/x86instapi_p.h"
 
 ASMJIT_BEGIN_SUB_NAMESPACE(x86)
 
@@ -28,7 +30,7 @@ static inline uint32_t getXmmMovInst(const FuncFrame& frame) {
                  : (avx ? Inst::kIdVmovups : Inst::kIdMovups);
 }
 
-//! Converts `size` to a 'kmov?' instructio.
+//! Converts `size` to a 'kmov?' instruction.
 static inline uint32_t kmovInstFromSize(uint32_t size) noexcept {
   switch (size) {
     case  1: return Inst::kIdKmovb;
@@ -68,8 +70,8 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitRegMove(
   // Detect memory operands and patch them to have the same size as the register. BaseCompiler always sets memory size
   // of allocs and spills, so it shouldn't be really necessary, however, after this function was separated from Compiler
   // it's better to make sure that the size is always specified, as we can use 'movzx' and 'movsx' that rely on it.
-  if (dst.isMem()) { memFlags |= kDstMem; dst.as<Mem>().setSize(src.size()); }
-  if (src.isMem()) { memFlags |= kSrcMem; src.as<Mem>().setSize(dst.size()); }
+  if (dst.isMem()) { memFlags |= kDstMem; dst.as<Mem>().setSize(src.as<Mem>().size()); }
+  if (src.isMem()) { memFlags |= kSrcMem; src.as<Mem>().setSize(dst.as<Mem>().size()); }
 
   switch (typeId) {
     case TypeId::kInt8:
@@ -423,6 +425,12 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitProlog(const FuncFrame& frame) {
   Gp gpReg = zsp;            // General purpose register (temporary).
   Gp saReg = zsp;            // Stack-arguments base pointer.
 
+  // Emit: 'endbr32' or 'endbr64' (indirect branch protection).
+  if (frame.hasIndirectBranchProtection()) {
+    InstId instId = emitter->is32Bit() ? Inst::kIdEndbr32 : Inst::kIdEndbr64;
+    ASMJIT_PROPAGATE(emitter->emit(instId));
+  }
+
   // Emit: 'push zbp'
   //       'mov  zbp, zsp'.
   if (frame.hasPreservedFP()) {
@@ -581,6 +589,35 @@ ASMJIT_FAVOR_SIZE Error EmitHelper::emitEpilog(const FuncFrame& frame) {
     ASMJIT_PROPAGATE(emitter->emit(Inst::kIdRet));
 
   return kErrorOk;
+}
+
+static Error ASMJIT_CDECL Emitter_emitProlog(BaseEmitter* emitter, const FuncFrame& frame) {
+  EmitHelper emitHelper(emitter, frame.isAvxEnabled(), frame.isAvx512Enabled());
+  return emitHelper.emitProlog(frame);
+}
+
+static Error ASMJIT_CDECL Emitter_emitEpilog(BaseEmitter* emitter, const FuncFrame& frame) {
+  EmitHelper emitHelper(emitter, frame.isAvxEnabled(), frame.isAvx512Enabled());
+  return emitHelper.emitEpilog(frame);
+}
+
+static Error ASMJIT_CDECL Emitter_emitArgsAssignment(BaseEmitter* emitter, const FuncFrame& frame, const FuncArgsAssignment& args) {
+  EmitHelper emitHelper(emitter, frame.isAvxEnabled(), frame.isAvx512Enabled());
+  return emitHelper.emitArgsAssignment(frame, args);
+}
+
+void assignEmitterFuncs(BaseEmitter* emitter) {
+  emitter->_funcs.emitProlog = Emitter_emitProlog;
+  emitter->_funcs.emitEpilog = Emitter_emitEpilog;
+  emitter->_funcs.emitArgsAssignment = Emitter_emitArgsAssignment;
+
+#ifndef ASMJIT_NO_LOGGING
+  emitter->_funcs.formatInstruction = FormatterInternal::formatInstruction;
+#endif
+
+#ifndef ASMJIT_NO_VALIDATION
+  emitter->_funcs.validate = emitter->is32Bit() ? InstInternal::validateX86 : InstInternal::validateX64;
+#endif
 }
 
 ASMJIT_END_SUB_NAMESPACE
