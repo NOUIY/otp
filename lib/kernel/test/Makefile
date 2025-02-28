@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 1997-2021. All Rights Reserved.
+# Copyright Ericsson AB 1997-2024. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,19 +25,29 @@ include $(ERL_TOP)/make/$(TARGET)/otp.mk
 # ----------------------------------------------------
 
 SOCKET_MODULES = \
+	gen_tcp_socket_SUITE \
 	socket_test_lib \
 	socket_test_logger \
 	socket_test_evaluator \
+	socket_test_ev_proxy \
+	socket_test_profile \
 	socket_test_ttest_lib \
 	socket_test_ttest_tcp_gen \
+	socket_test_ttest_tcp_gs \
 	socket_test_ttest_tcp_socket \
 	socket_test_ttest_tcp_client \
 	socket_test_ttest_tcp_client_gen \
+	socket_test_ttest_tcp_client_gs \
 	socket_test_ttest_tcp_client_socket \
 	socket_test_ttest_tcp_server \
 	socket_test_ttest_tcp_server_gen \
+	socket_test_ttest_tcp_server_gs \
 	socket_test_ttest_tcp_server_socket \
-	socket_SUITE
+	socket_suites \
+	socket_SUITE \
+	socket_api_SUITE \
+	socket_traffic_SUITE \
+	socket_ttest_SUITE
 
 MODULES= \
 	kernel_test_lib \
@@ -63,6 +73,7 @@ MODULES= \
 	appinc2B \
 	code_SUITE \
 	code_b_test \
+	code_coverage_SUITE \
 	disk_log_SUITE \
 	erl_boot_server_SUITE \
 	erl_distribution_SUITE \
@@ -70,7 +81,6 @@ MODULES= \
 	erl_prim_loader_SUITE \
 	erl_uds_dist \
 	error_handler_SUITE \
-	error_info_lib \
 	error_logger_SUITE \
 	error_logger_warn_SUITE \
 	file_SUITE \
@@ -107,13 +117,13 @@ MODULES= \
 	net_SUITE \
 	os_SUITE \
 	pg_SUITE \
+	rtnode \
 	seq_trace_SUITE \
 	$(SOCKET_MODULES) \
 	wrap_log_reader_SUITE \
 	cleanup \
 	ignore_cores \
 	zlib_SUITE \
-	loose_node \
 	sendfile_SUITE \
 	standard_error_SUITE \
 	multi_load_SUITE \
@@ -133,8 +143,12 @@ APP_FILES = \
 	topApp3.app
 
 SASL_MODULES= otp_vsns
+STDLIB_MODULES= error_info_lib
 
-ERL_FILES= $(MODULES:%=%.erl) code_a_test.erl $(SASL_MODULES:%=$(ERL_TOP)/lib/sasl/test/%.erl)
+ERL_FILES= $(MODULES:%=%.erl) code_a_test.erl \
+	$(SASL_MODULES:%=$(ERL_TOP)/lib/sasl/test/%.erl) \
+	$(STDLIB_MODULES:%=$(ERL_TOP)/lib/stdlib/test/%.erl)
+
 HRL_FILES= \
 	kernel_test_lib.hrl \
 	socket_test_evaluator.hrl \
@@ -147,7 +161,7 @@ TARGET_FILES= $(MODULES:%=$(EBIN)/%.$(EMULATOR))
 INSTALL_PROGS= $(TARGET_FILES)
 
 EMAKEFILE=Emakefile
-COVERFILE=kernel.cover logger.cover
+COVERFILE=kernel.cover logger.cover tty.cover
 
 # ----------------------------------------------------
 # Release directory specification
@@ -159,7 +173,8 @@ RELSYSDIR = $(RELEASE_PATH)/kernel_test
 # ----------------------------------------------------
 
 ERL_MAKE_FLAGS +=
-ERL_COMPILE_FLAGS +=
+ERL_COMPILE_FLAGS += +nowarn_missing_spec_documented
+ERL_COMPILE_FLAGS := $(filter-out +deterministic,$(ERL_COMPILE_FLAGS))
 
 EBIN = .
 
@@ -180,7 +195,8 @@ erl_uds_dist.erl: ../examples/erl_uds_dist/src/erl_uds_dist.erl
 make_emakefile: $(ERL_FILES)
 	$(ERL_TOP)/make/make_emakefile $(ERL_COMPILE_FLAGS) -o$(EBIN) '*_SUITE_make' \
 	> $(EMAKEFILE)
-	$(ERL_TOP)/make/make_emakefile $(ERL_COMPILE_FLAGS) -o$(EBIN) $(MODULES) $(SASL_MODULES) \
+	$(ERL_TOP)/make/make_emakefile $(ERL_COMPILE_FLAGS) -o$(EBIN) \
+	  $(MODULES) $(SASL_MODULES) $(STDLIB_MODULES) \
 	>> $(EMAKEFILE)
 
 tests $(TYPES): make_emakefile
@@ -209,10 +225,11 @@ release_tests_spec: make_emakefile
 	$(INSTALL_DATA) $(ERL_FILES) $(HRL_FILES) "$(RELSYSDIR)"
 	$(INSTALL_DATA) $(APP_FILES) $(EXTRA_FILES) "$(RELSYSDIR)"
 	$(INSTALL_DATA) \
-		kernel.spec kernel_smoke.spec kernel_bench.spec logger.spec \
+		kernel.spec kernel_smoke.spec kernel_bench.spec kernel_gh.spec logger.spec \
 		$(EMAKEFILE) $(COVERFILE) "$(RELSYSDIR)"
 	chmod -R u+w "$(RELSYSDIR)"
 	@tar cf - *_SUITE_data | (cd "$(RELSYSDIR)"; tar xf -)
+	$(INSTALL_DIR) "$(RELSYSDIR)/kernel_SUITE_data"
 	$(INSTALL_DATA) $(ERL_TOP)/make/otp_version_tickets "$(RELSYSDIR)/kernel_SUITE_data"
 
 release_docs_spec:

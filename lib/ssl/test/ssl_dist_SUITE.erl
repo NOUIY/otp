@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
+-include_lib("kernel/include/net_address.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
 -include("ssl_dist_test_lib.hrl").
@@ -37,6 +39,13 @@
 %% Test cases
 -export([basic/0,
          basic/1,
+         embedded/0,
+         embedded/1,
+         ktls_encrypt_decrypt/0,
+         ktls_encrypt_decrypt/1,
+         ktls_verify/0,
+         ktls_verify/1,
+         monitor_nodes/1,
          payload/0,
          payload/1,
          dist_port_overload/0,
@@ -67,6 +76,7 @@
 
 %% Apply export
 -export([basic_test/3,
+         monitor_nodes_test/3,
          payload_test/3,
          plain_options_test/3,
          plain_verify_options_test/3,
@@ -96,13 +106,18 @@
          stop_ssl_node/1]).
 
 start_ssl_node_name(Name, Args) ->
-    ssl_dist_test_lib:start_ssl_node(Name, Args).
+    Pa = filename:dirname(code:which(?MODULE)),
+    ssl_dist_test_lib:start_ssl_node(Name, "-pa " ++ Pa ++ " " ++ Args).
 
 %%--------------------------------------------------------------------
 %% Common Test interface functions -----------------------------------
 %%--------------------------------------------------------------------
 all() ->
     [basic,
+     embedded,
+     ktls_encrypt_decrypt,
+     ktls_verify,
+     monitor_nodes,
      payload,
      dist_port_overload,
      plain_options,
@@ -120,7 +135,7 @@ all() ->
 
 init_per_suite(Config0) ->
     _ = end_per_suite(Config0),
-    try crypto:start() of
+    try application:start(crypto) of
 	ok ->
 	    %% Currently no ct function available for is_cover!
 	    case test_server:is_cover() of
@@ -138,31 +153,46 @@ init_per_suite(Config0) ->
 end_per_suite(_Config) ->
     application:stop(crypto).
 
-init_per_testcase(plain_verify_options = Case, Config) when is_list(Config) ->
-    SslFlags = setup_tls_opts(Config),
-    Flags = case os:getenv("ERL_FLAGS") of
-		false ->
-		    os:putenv("ERL_FLAGS", SslFlags),
-		    "";
-		OldFlags ->
-		    os:putenv("ERL_FLAGS", OldFlags ++ " " ++ SslFlags),
-		    OldFlags
-    end,
-    common_init(Case, [{old_flags, Flags} | Config]);
 
-init_per_testcase(Case, Config) when is_list(Config) ->
+init_per_testcase(Case, Config) ->
+    try init_per_tc(Case, Config)
+    catch
+        Class : Reason : Stacktrace ->
+            {fail, {Class, Reason, Stacktrace}}
+    end.
+
+init_per_tc(embedded, Config) ->
+    LibDir = code:lib_dir(),
+    case
+        lists:all(
+          fun ({App,_,VSN}) ->
+                  filelib:is_dir(
+                    filename:join(
+                      LibDir, atom_to_list(App)++"-"++VSN))
+          end, application_controller:which_applications())
+    of
+        false ->
+            {skip, "Must be run from a real Erlang installation"};
+        true ->
+            Config
+    end;
+init_per_tc(Case, Config)
+  when Case =:= ktls_verify, is_list(Config) ->
+    case ktls_encrypt_decrypt(false) of
+        ok ->
+            common_init(Case, Config);
+        Skip ->
+            Skip
+    end;
+%%
+init_per_tc(Case, Config) when is_list(Config) ->
     common_init(Case, Config).
 
 common_init(Case, Config) ->
     ct:timetrap({seconds, ?DEFAULT_TIMETRAP_SECS}),
     [{testcase, Case}|Config].
 
-end_per_testcase(Case, Config) when is_list(Config) ->
-    Flags = proplists:get_value(old_flags, Config),
-    catch os:putenv("ERL_FLAGS", Flags),
-    common_end(Case, Config).
-
-common_end(_, _Config) ->
+end_per_testcase(_, _Config) ->
     ok.
 
 %%--------------------------------------------------------------------
@@ -174,6 +204,188 @@ basic() ->
 basic(Config) when is_list(Config) ->
     gen_dist_test(basic_test, Config).
 
+embedded() ->
+    [{doc,"Test that two nodes can connect via ssl distribution in embedded mode"}].
+embedded(Config) when is_list(Config) ->
+    ReleaseDir = filename:join(proplists:get_value(priv_dir,Config), "embedded"),
+    EbinDir = filename:join(ReleaseDir,"ebin/"),
+
+    %% Create an application for the test modules
+    Modules = [ssl_dist_test_lib, ?MODULE],
+    App = {application, tls_test,
+           [{description, "Erlang/OTP SSL test application"},
+            {vsn, "1.0"},
+            {modules, Modules},
+            {registered,[]},
+            {applications, [kernel, stdlib]}]},
+    ok = filelib:ensure_path(EbinDir),
+    [{ok,_} = file:copy(code:which(Mod), filename:join(EbinDir, atom_to_list(Mod)++".beam"))
+     || Mod <- Modules],
+    ok = file:write_file(filename:join(EbinDir,"tls_test.app"),
+                         io_lib:format("~p.",[App])),
+
+    %% Create a release that we can boot from
+    Rel = {release, {"tls","1.0"}, {erts, get_app_vsn(erts)},
+           [{tls_test, "1.0"},
+            {kernel, get_app_vsn(kernel)},
+            {stdlib, get_app_vsn(stdlib)},
+            {public_key, get_app_vsn(public_key)},
+            {asn1, get_app_vsn(asn1)},
+            {sasl, get_app_vsn(sasl)},
+            {crypto, get_app_vsn(crypto)},
+            {ssl, get_app_vsn(ssl)}]},
+    TlsRel = filename:join(ReleaseDir, "tls"),
+    ok = file:write_file(TlsRel ++ ".rel", io_lib:format("~p.",[Rel])),
+    code:add_patha(EbinDir),
+    ok = systools:make_script(TlsRel),
+    ok = systools:script2boot(TlsRel),
+
+    %% Start two nodes in embedded mode and make sure they can connect
+    %% There used to be a bug here where crypto was not loaded early enough
+    %% for the distributed connection to work.
+    NodeConfig = [{app_opts, "-boot "++TlsRel++" -mode embedded -pa "++EbinDir++" "} | Config],
+    Node1 = peer:random_name(),
+    Node2 = peer:random_name(),
+
+    NH1 = start_ssl_node([{node_name,Node1}|NodeConfig]),
+    %% The second node does `sync_nodes_mandatory` with the first in order for
+    %% a connection to be established very early in the boot sequence
+    ok = file:write_file(
+           filename:join(ReleaseDir,"node2.config"),
+           io_lib:format(
+             "~p.",[[{kernel,
+                      [{sync_nodes_timeout,infinity},
+                       {sync_nodes_mandatory,
+                        [list_to_atom(Node1++"@"++inet_db:gethostname())]}]}]])),
+    NH2 = start_ssl_node([{node_name,Node2}|NodeConfig],
+                         " -config " ++ filename:join(ReleaseDir,"node2")),
+
+    try
+        basic_test(NH1, NH2, Config)
+    catch
+	_:Reason ->
+	    stop_ssl_node(NH1),
+	    stop_ssl_node(NH2),
+	    ct:fail(Reason)
+    end,
+    stop_ssl_node(NH1),
+    stop_ssl_node(NH2),
+    success(Config).
+
+%%--------------------------------------------------------------------
+ktls_encrypt_decrypt() ->
+    [{doc,"Test that kTLS encryption offloading works"}].
+ktls_encrypt_decrypt(Config) when is_list(Config) ->
+    ktls_encrypt_decrypt(true);
+%%
+%%  ktls_encrypt_decrypt(false) is used by init_per_tc(ktls_verify, _)
+%%
+ktls_encrypt_decrypt(Test) when is_boolean(Test) ->
+    %%
+    %% We need a connected socket
+    {ok, Listen} = gen_tcp:listen(0, [{active, false}]),
+    {ok, Port} = inet:port(Listen),
+    {ok, Client} =
+        gen_tcp:connect({127,0,0,1}, Port, [{active, false}]),
+    {ok, Server} = gen_tcp:accept(Listen),
+    try
+        maybe
+            {ok, OS} ?= ssl_test_lib:ktls_os(),
+            ok ?= ssl_test_lib:ktls_set_ulp(Client, OS),
+            ok ?= ssl_test_lib:ktls_set_cipher(Client, OS, tx, 11),
+            case Test of
+                false ->
+                    ok;
+                true ->
+                    ktls_encrypt_decrypt(Client, Server)
+            end
+        else
+            {error, Reason} ->
+                {skip, Reason}
+        end
+    after
+        _ = gen_tcp:close(Server),
+        _ = gen_tcp:close(Client),
+        _ = gen_tcp:close(Listen)
+    end.
+
+ktls_encrypt_decrypt(Client, Server) ->
+    %%
+    %% Test to transfer encrypted data,
+    %% and also to not activate RX encryption and transfer data.
+    %%
+    Data = "The quick brown fox jumps over a lazy dog 0123456789",
+    %%
+    %% Send encrypted from Client before Server has activated decryption
+    ok = gen_tcp:send(Client, Data),
+    receive after 500 -> ok end, % Give time for data to arrive
+    %%
+    %% Activate Server TX encryption
+    {ok, OS} = ssl_test_lib:ktls_os(),
+    ok = ssl_test_lib:ktls_set_ulp(Server, OS),
+    ok = ssl_test_lib:ktls_set_cipher(Server, OS, tx, 17),
+    %% Send encrypted from Server
+    ok = gen_tcp:send(Server, Data),
+    %% Receive encrypted data without decryption
+    case gen_tcp:recv(Client, 0, 1000) of
+        {ok, Data} ->
+            ct:fail(recv_cleartext_data);
+        {ok, RandomData} when length(Data) < length(RandomData) ->
+            ?CT_LOG("Received ~p", [RandomData]),
+            %% A TLS block should be longer than Data
+            ok
+    end,
+    %% Finally, activate Server decryption
+    ok = ssl_test_lib:ktls_set_cipher(Server, OS, rx, 11),
+    %% Receive and decrypt the data that was first sent
+    {ok, Data} = gen_tcp:recv(Server, 0, 1000),
+    ok.
+
+%%--------------------------------------------------------------------
+ktls_verify() ->
+    [{doc,
+      "Test that two nodes can connect via ssl distribution over kTLS"}].
+ktls_verify(Config) ->
+    KTLSOpts = "-ssl_dist_opt "
+        "client_versions tlsv1.3 "
+        "server_versions tlsv1.3 "
+        "client_ciphers TLS_AES_256_GCM_SHA384 "
+        "server_ciphers TLS_AES_256_GCM_SHA384 "
+        "client_ktls true "
+        "server_ktls true ",
+    KTLSConfig = [{tls_verify_opts, KTLSOpts} | Config],
+    gen_dist_test(
+      fun (NH1, NH2) ->
+              basic_test(NH1, NH2, KTLSConfig),
+              0 = ktls_count_tls_dist(NH1),
+              0 = ktls_count_tls_dist(NH2),
+              ok
+      end, KTLSConfig).
+
+%% Verify that kTLS was activated (whitebox verification);
+%% check that a specific supervisor has no child supervisor
+%% which indicates that ssl_gen_statem:ktls_handover/1 has succeeded
+%%
+ktls_count_tls_dist(Node) ->
+    Key = supervisors,
+    case
+        lists:keyfind(
+          Key, 1,
+          apply_on_ssl_node(
+            Node, supervisor, count_children,
+            [tls_dist_connection_sup]))
+    of
+        {Key, N} ->
+            N;
+        false ->
+            0
+    end.
+
+%%--------------------------------------------------------------------
+%% Test net_kernel:monitor_nodes with nodedown_reason (OTP-17838)
+monitor_nodes(Config) when is_list(Config) ->
+    gen_dist_test(monitor_nodes_test, Config).
+
 %%--------------------------------------------------------------------
 payload() ->
     [{doc,"Test that send a lot of data between the ssl distributed nodes"}].
@@ -184,16 +396,20 @@ payload(Config) when is_list(Config) ->
 dist_port_overload() ->
     [{doc, "Test that TLS distribution connections can be accepted concurrently"}].
 dist_port_overload(Config) when is_list(Config) ->
+    (RequiredConcurrency = 2) =< erlang:system_info(schedulers_online)
+        orelse
+        throw({skip, "Not enough schedulers online"}),
+    %%
     %% Start a node, and get the port number it's listening on.
     #node_handle{nodename = NodeName} = NH1 = start_ssl_node(Config),
     [Name, Host] = string:lexemes(atom_to_list(NodeName), "@"),
     {ok, NodesPorts} = apply_on_ssl_node(NH1, fun net_adm:names/0),
     {Name, Port} = lists:keyfind(Name, 1, NodesPorts),
-    %% Run 4 connections concurrently. When TLS handshake is not concurrent,
-    %%  and with default net_setuptime of 7 seconds, only one connection per 7
-    %%  seconds is closed from server side. With concurrent accept, all 7 will
-    %%  be dropped in 7 seconds
-    RequiredConcurrency = 4,
+    %% Run RequiredConcurrency connections concurrently.
+    %% When TLS handshake is not concurrent,
+    %% and with default net_setuptime of 7 seconds,
+    %% only one connection per 7 seconds is closed from server side.
+    %% With concurrent accept they will be closed in parallel.
     Started = [connect(self(), Host, Port) || _ <- lists:seq(1, RequiredConcurrency)],
     %% give 10 seconds (more than 7, less than 2x7 seconds)
     Responded = barrier(RequiredConcurrency, [], erlang:system_time(millisecond) + 10000),
@@ -249,11 +465,15 @@ plain_options(Config) when is_list(Config) ->
 plain_verify_options() ->
     [{doc,"Test specifying tls options including certificate verification options"}].
 plain_verify_options(Config) when is_list(Config) ->
-    TLSOpts = "-ssl_dist_opt server_secure_renegotiate true "
-	"client_secure_renegotiate true "
-        "server_hibernate_after 500 client_hibernate_after 500"
-	"server_reuse_sessions true client_reuse_sessions true  "
-        "server_depth 1 client_depth 1 ",
+    TLSOpts = "-ssl_dist_opt "
+        "server_secure_renegotiate true "
+        "client_secure_renegotiate true "
+        "server_hibernate_after 500 "
+        "client_hibernate_after 500 "
+        "server_reuse_sessions true "
+        "client_reuse_sessions true "
+        "server_depth 1 "
+        "client_depth 1 ",
     gen_dist_test(plain_verify_options_test, [{tls_verify_opts, TLSOpts} | Config]).
 
 %%--------------------------------------------------------------------
@@ -272,56 +492,45 @@ nodelay_option(Config) ->
 listen_port_options() ->
     [{doc, "Test specifying listening ports"}].
 listen_port_options(Config) when is_list(Config) ->
-    %% Start a node, and get the port number it's listening on.
+    %% Set up the probably most supported scenario
+    %% for {reuseaddr,true}, i.e, the listening socket
+    %% is closed, but an accepted server side socket
+    %% blocks the server port, unless {reuseaddr,true}
+    %% is used.
+    %%
+    %% Set up a server socket and close the listening socket
+    {ok, L}    = gen_tcp:listen(0, [{reuseaddr,true}]),
+    {ok, Port} = inet:port(L),
+    {ok, C}    = gen_tcp:connect({127,0,0,1}, Port, []),
+    {ok, S}    = gen_tcp:accept(L),
+    ok         = gen_tcp:close(L),
+    ?CT_LOG("Port: ~w", [Port]),
+    %%
+    %% Start a node on the server port, {reuseaddr,true}
+    %% is used per default on the listening socket
+    %% since it is a server - see inet_tcp_dist:gen_listen/3
+    PortOpts =
+        "-kernel"
+        " inet_dist_listen_min " ++ integer_to_list(Port) ++
+        " inet_dist_listen_max " ++ integer_to_list(Port),
+    %% basic_test/3 connects NH1 -> NH2 so it is NH2 that should
+    %% act as server to make use of PortOpts
     NH1 = start_ssl_node(Config),
-    Node1 = NH1#node_handle.nodename,
-    Name1 = lists:takewhile(fun(C) -> C =/= $@ end, atom_to_list(Node1)),
-    {ok, NodesPorts} = apply_on_ssl_node(NH1, fun net_adm:names/0),
-    {Name1, Port1} = lists:keyfind(Name1, 1, NodesPorts),
-    
-    %% Now start a second node, configuring it to use the same port
-    %% number.
-    PortOpt1 = "-kernel inet_dist_listen_min " ++ integer_to_list(Port1) ++
-        " inet_dist_listen_max " ++ integer_to_list(Port1),
-    
-    try start_ssl_node([{tls_verify_opts, PortOpt1} | proplists:delete(tls_verify_opts, Config)]) of
-	#node_handle{} ->
-	    %% If the node was able to start, it didn't take the port
-	    %% option into account.
-	    stop_ssl_node(NH1),
-	    exit(unexpected_success)
-    catch
-	exit:{accept_failed, timeout} ->
-	    %% The node failed to start, as expected.
-	    ok
-    end,
-    
-    %% Try again, now specifying a high max port.
-    PortOpt2 = "-kernel inet_dist_listen_min " ++ integer_to_list(Port1) ++
-	" inet_dist_listen_max 65535",
-    NH2 = start_ssl_node([{tls_verify_opts, PortOpt2} |  proplists:delete(tls_verify_opts, Config)]),
-    
-    try 
-	Node2 = NH2#node_handle.nodename,
-	Name2 = lists:takewhile(fun(C) -> C =/= $@ end, atom_to_list(Node2)),
-	{ok, NodesPorts2} = apply_on_ssl_node(NH2, fun net_adm:names/0),
-	{Name2, Port2} = lists:keyfind(Name2, 1, NodesPorts2),
-	
-	%% The new port should be higher:
-	if Port2 > Port1 ->
-		ok;
-	   true ->
-		error({port, Port2, not_higher_than, Port1})
-	end
-    catch
-	_:Reason ->
-	    stop_ssl_node(NH2),
-	    stop_ssl_node(NH1),
-	    ct:fail(Reason)
-    end,
-    stop_ssl_node(NH2),
-    stop_ssl_node(NH1),
-    success(Config).
+    NH2 = start_ssl_node(Config, PortOpts),
+    try
+        basic_test(NH1, NH2, Config),
+        Node2 = NH2#node_handle.nodename,
+        {ok,NodeInfo2} =
+            apply_on_ssl_node(NH1, net_kernel, node_info, [Node2]),
+        {address,#net_address{address = {_,Port}, protocol = tls}} =
+            lists:keyfind(address, 1, NodeInfo2),
+        ok
+    after
+        gen_tcp:close(C),
+        gen_tcp:close(S),
+        stop_ssl_node(NH1),
+        stop_ssl_node(NH2)
+    end.
 
 %%--------------------------------------------------------------------
 listen_options() ->
@@ -339,15 +548,7 @@ connect_options(Config) when is_list(Config) ->
 net_ticker_spawn_options() ->
     [{doc, "Test net_ticker_spawn_options"}].
 net_ticker_spawn_options(Config) when is_list(Config) ->
-    FullsweepString0 = "[{fullsweep_after,0}]",
-    FullsweepString =
-        case os:cmd("echo [{a,1}]") of
-            "[{a,1}]"++_ ->
-                FullsweepString0;
-            _ ->
-                %% Some shells need quoting of [{}]
-                "'"++FullsweepString0++"'"
-        end,
+    FullsweepString = maybe_quote_tuple_list("[{fullsweep_after,0}]"),
     Options = "-kernel net_ticker_spawn_options "++FullsweepString,
     gen_dist_test(net_ticker_spawn_options_test, [{tls_only_basic_opts, Options} | Config]).
 
@@ -463,16 +664,20 @@ address_please(_, _, _) ->
 gen_dist_test(Test, Config) ->
     NH1 = start_ssl_node(Config),
     NH2 = start_ssl_node(Config),
-    try 
-	?MODULE:Test(NH1, NH2, Config)
+    try
+        if
+            is_atom(Test) ->
+                ?MODULE:Test(NH1, NH2, Config);
+            is_function(Test, 2) ->
+                Test(NH1, NH2)
+        end
     catch
-	_:Reason ->
-	    stop_ssl_node(NH1),
-	    stop_ssl_node(NH2),
-	    ct:fail(Reason)
+	Class:Reason:Stacktrace ->
+	    ct:fail({Class,Reason,Stacktrace})
+    after
+        stop_ssl_node(NH1),
+        stop_ssl_node(NH2)
     end,
-    stop_ssl_node(NH1),
-    stop_ssl_node(NH2),	
     success(Config).
 
 %% ssl_node side api
@@ -495,12 +700,15 @@ try_setting_priority(TestFun, Config) ->
 	{error,_} ->
 	    {skip, "Can not set priority on socket"}
     end.
+
 basic_test(NH1, NH2, _) ->
     Node1 = NH1#node_handle.nodename,
     Node2 = NH2#node_handle.nodename,
     pong = apply_on_ssl_node(NH1, fun () -> net_adm:ping(Node2) end),
     [Node2] = apply_on_ssl_node(NH1, fun () -> nodes() end),
     [Node1] = apply_on_ssl_node(NH2, fun () -> nodes() end),
+
+    verify_tls(NH1, NH2),
 
     %% The test_server node has the same cookie as the ssl nodes
     %% but it should not be able to communicate with the ssl nodes
@@ -550,11 +758,48 @@ basic_test(NH1, NH2, _) ->
 		    end)
      end.
 
+monitor_nodes_test(NH1, NH2, _) ->
+    Node2 = NH2#node_handle.nodename,
+
+    Ref = make_ref(),
+    MonitorNodesFun =
+        fun() ->
+                tstsrvr_format("Hi from ~p!~n", [node()]),
+                ok = net_kernel:monitor_nodes(true, [nodedown_reason]),
+                send_to_tstcntrl({self(), ready, Ref}),
+                NodeUp = receive_any(),
+                send_to_tstcntrl({self(), got, NodeUp}),
+                NodeDown = receive_any(),
+                send_to_tstcntrl({self(), got, NodeDown}),
+                ok = net_kernel:monitor_nodes(false, [nodedown_reason])
+        end,
+    spawn_link(fun () ->
+                       ok = apply_on_ssl_node(NH1, MonitorNodesFun)
+               end),
+    {SslPid, ready, Ref} = receive_any(),
+
+    %% Setup connection and expect 'nodeup'
+    pong = apply_on_ssl_node(NH1, fun () -> net_adm:ping(Node2) end),
+    {SslPid, got, {nodeup, Node2, []}} = receive_any(),
+
+    %% Disconnect and expect 'nodedown' with correct reason
+    true = apply_on_ssl_node(NH1, fun () ->
+                                          net_kernel:disconnect(Node2)
+                                  end),
+    {SslPid, got, {nodedown, Node2, [{nodedown_reason, disconnect}]}} = receive_any(),
+    ok.
+
+
+receive_any() ->
+    receive M -> M end.
+
 payload_test(NH1, NH2, _) ->
     Node1 = NH1#node_handle.nodename,
     Node2 = NH2#node_handle.nodename,
 
     pong = apply_on_ssl_node(NH1, fun () -> net_adm:ping(Node2) end),
+
+    verify_tls(NH1, NH2),
 
     [Node2] = apply_on_ssl_node(NH1, fun () -> nodes() end),
     [Node1] = apply_on_ssl_node(NH2, fun () -> nodes() end),
@@ -592,6 +837,8 @@ plain_options_test(NH1, NH2, _) ->
 
     pong = apply_on_ssl_node(NH1, fun () -> net_adm:ping(Node2) end),
 
+    verify_tls(NH1, NH2),
+
     [Node2] = apply_on_ssl_node(NH1, fun () -> nodes() end),
     [Node1] = apply_on_ssl_node(NH2, fun () -> nodes() end).
 
@@ -601,20 +848,14 @@ plain_verify_options_test(NH1, NH2, _) ->
 
     pong = apply_on_ssl_node(NH1, fun () -> net_adm:ping(Node2) end),
 
+    verify_tls(NH1, NH2),
+
     [Node2] = apply_on_ssl_node(NH1, fun () -> nodes() end),
     [Node1] = apply_on_ssl_node(NH2, fun () -> nodes() end).
 
 do_listen_options(Prio, Config) ->
-    PriorityString0 = "[{priority,"++integer_to_list(Prio)++"}]",
     PriorityString =
-	case os:cmd("echo [{a,1}]") of
-	    "[{a,1}]"++_ ->
-		PriorityString0;
-	    _ ->
-		%% Some shells need quoting of [{}]
-		"'"++PriorityString0++"'"
-	end,
-
+        maybe_quote_tuple_list("[{priority,"++integer_to_list(Prio)++"}]"),
     Options = "-kernel inet_dist_listen_options " ++ PriorityString,
     gen_dist_test(listen_options_test, [{prio, Prio}, {tls_only_basic_opts, Options} | Config]).
 
@@ -629,23 +870,15 @@ listen_options_test(NH1, NH2, Config) ->
 	apply_on_ssl_node(NH2, fun get_socket_priorities/0),
 
     Elevated1 = [P || P <- PrioritiesNode1, P =:= Prio],
-    ct:pal("Elevated1: ~p~n", [Elevated1]),
+    ?CT_LOG("Elevated1: ~p~n", [Elevated1]),
     Elevated2 = [P || P <- PrioritiesNode2, P =:= Prio],
-    ct:pal("Elevated2: ~p~n", [Elevated2]),
+    ?CT_LOG("Elevated2: ~p~n", [Elevated2]),
     [_|_] = Elevated1,
     [_|_] = Elevated2.
 
 do_connect_options(Prio, Config) ->
-    PriorityString0 = "[{priority,"++integer_to_list(Prio)++"}]",
     PriorityString =
-	case os:cmd("echo [{a,1}]") of
-	    "[{a,1}]"++_ ->
-		PriorityString0;
-	    _ ->
-		%% Some shells need quoting of [{}]
-		"'"++PriorityString0++"'"
-	end,
-
+        maybe_quote_tuple_list("[{priority,"++integer_to_list(Prio)++"}]"),
     Options = "-kernel inet_dist_connect_options " ++ PriorityString,
     gen_dist_test(connect_options_test,
 		  [{prio, Prio}, {tls_only_basic_opts, Options} | Config]).
@@ -662,9 +895,9 @@ connect_options_test(NH1, NH2, Config) ->
 	apply_on_ssl_node(NH2, fun get_socket_priorities/0),
 
     Elevated1 = [P || P <- PrioritiesNode1, P =:= Prio],
-    ct:pal("Elevated1: ~p~n", [Elevated1]),
+    ?CT_LOG("Elevated1: ~p~n", [Elevated1]),
     Elevated2 = [P || P <- PrioritiesNode2, P =:= Prio],
-    ct:pal("Elevated2: ~p~n", [Elevated2]),
+    ?CT_LOG("Elevated2: ~p~n", [Elevated2]),
     %% Node 1 will have a socket with elevated priority.
     [_|_] = Elevated1,
     %% Node 2 will not, since it only applies to outbound connections.
@@ -681,8 +914,8 @@ net_ticker_spawn_options_test(NH1, NH2, _Config) ->
     FullsweepOptionNode2 =
         apply_on_ssl_node(NH2, fun () -> get_dist_util_fullsweep_option(Node1) end),
 
-    ct:pal("FullsweepOptionNode1: ~p~n", [FullsweepOptionNode1]),
-    ct:pal("FullsweepOptionNode2: ~p~n", [FullsweepOptionNode2]),
+    ?CT_LOG("FullsweepOptionNode1: ~p~n", [FullsweepOptionNode1]),
+    ?CT_LOG("FullsweepOptionNode2: ~p~n", [FullsweepOptionNode2]),
 
     0 = FullsweepOptionNode1,
     0 = FullsweepOptionNode2.
@@ -748,38 +981,52 @@ start_ssl_node(Config, XArgs) ->
     App = proplists:get_value(app_opts, Config),
     SSLOpts = setup_tls_opts(Config),
     start_ssl_node_name(
-      Name, App ++ " " ++ SSLOpts ++ XArgs).
+      Name, App ++ " " ++ SSLOpts ++ " " ++ XArgs).
 
 
 mk_node_name(Config) ->
-    N = erlang:unique_integer([positive]),
-    Case = proplists:get_value(testcase, Config),
-    Hostname =
-        case proplists:get_value(hostname, Config) of
-            undefined -> "";
-            Host -> "@" ++ Host
-        end,
-    atom_to_list(?MODULE)
-	++ "_"
-	++ atom_to_list(Case)
-	++ "_"
-	++ integer_to_list(N) ++ Hostname.
-
+    case proplists:get_value(node_name, Config) of
+        undefined ->
+            N = erlang:unique_integer([positive]),
+            Case = proplists:get_value(testcase, Config),
+            Hostname =
+                case proplists:get_value(hostname, Config) of
+                    undefined -> "";
+                    Host -> "@" ++ Host
+                end,
+            atom_to_list(?MODULE)
+                ++ "_"
+                ++ atom_to_list(Case)
+                ++ "_"
+                ++ integer_to_list(N) ++ Hostname;
+        Name ->
+            Name
+    end.
 
 setup_certs(Config) ->
+    {ok,Host} = inet:gethostname(),
+    Extensions =
+        {extensions,
+         [#'Extension'{
+             extnID = ?'id-ce-subjectAltName',
+             extnValue = [{dNSName, Host}],
+             critical = false}]},
     PrivDir = proplists:get_value(priv_dir, Config),
-    DerConfig = public_key:pkix_test_data(#{server_chain => #{root => rsa_root_key(1),
-                                                              intermediates => [rsa_intermediate(2)],
-                                                              peer => rsa_peer_key(3)},
-                                            client_chain => #{root => rsa_root_key(1), 
-                                                              intermediates => [rsa_intermediate(5)],
-                                                              peer => rsa_peer_key(6)}}), 
+    DerConfig =
+        public_key:pkix_test_data(
+          #{server_chain =>
+                #{root => [rsa_root_key(1), {digest,sha256}],
+                  intermediates => [rsa_intermediate_conf(2)],
+                  peer => [rsa_peer_key(3),  {digest, sha256}, Extensions]},
+            client_chain =>
+                #{root => [rsa_root_key(1),  {digest, sha256}],
+                  intermediates => [rsa_intermediate_conf(5)],
+                  peer => [rsa_peer_key(6), {digest, sha256}, Extensions]}}),
     ClientBase = filename:join([PrivDir, "rsa"]),
-    SeverBase =  filename:join([PrivDir, "rsa"]),   
-   
-    _  = x509_test:gen_pem_config_files(DerConfig, ClientBase, SeverBase).
-    
-setup_tls_opts(Config) ->    
+    ServerBase =  filename:join([PrivDir, "rsa"]),
+    _  = x509_test:gen_pem_config_files(DerConfig, ClientBase, ServerBase).
+
+setup_tls_opts(Config) ->
     PrivDir = proplists:get_value(priv_dir, Config),
     SC = filename:join([PrivDir, "rsa_server_cert.pem"]),
     SK = filename:join([PrivDir, "rsa_server_key.pem"]),
@@ -791,11 +1038,12 @@ setup_tls_opts(Config) ->
     case proplists:get_value(tls_only_basic_opts, Config, []) of
         [_|_] = BasicOpts -> %% No verify but server still need to have cert
             "-proto_dist inet_tls " ++ "-ssl_dist_opt server_certfile " ++ SC ++ " "
-                ++ "-ssl_dist_opt server_keyfile " ++ SK ++ " " ++ BasicOpts; 
+                ++ "-ssl_dist_opt server_keyfile " ++ SK ++ " " ++ " -ssl_dist_opt client_verify verify_none " ++ BasicOpts;
         [] -> %% Verify
-             case proplists:get_value(tls_verify_opts, Config, []) of
+            TlsVerifyOpts = proplists:get_value(tls_verify_opts, Config, []),
+             case TlsVerifyOpts of
                  [_|_] ->
-                     BasicVerifyOpts = "-proto_dist inet_tls "
+                     "-proto_dist inet_tls "
                          ++ "-ssl_dist_opt server_certfile " ++ SC ++ " "
                          ++ "-ssl_dist_opt server_keyfile " ++ SK ++ " "
                          ++ "-ssl_dist_opt server_cacertfile " ++ SCA ++ " "
@@ -804,11 +1052,11 @@ setup_tls_opts(Config) ->
                          ++ "-ssl_dist_opt client_certfile " ++ CC ++ " "
                          ++ "-ssl_dist_opt client_keyfile " ++ CK ++ " "
                          ++ "-ssl_dist_opt client_cacertfile " ++ CCA ++ " "
-                         ++ "-ssl_dist_opt client_verify verify_peer ",
-                     BasicVerifyOpts ++  proplists:get_value(tls_verify_opts, Config, []);
+                         ++ "-ssl_dist_opt client_verify verify_peer "
+                         ++  TlsVerifyOpts;
                  _ ->  %% No verify, no extra opts
                      "-proto_dist inet_tls " ++ "-ssl_dist_opt server_certfile " ++ SC ++ " "
-                         ++ "-ssl_dist_opt server_keyfile " ++ SK ++ " "
+                         ++ "-ssl_dist_opt server_keyfile " ++ SK ++ " " ++ "-ssl_dist_opt client_verify verify_none "
              end
     end.
 
@@ -831,9 +1079,10 @@ add_ssl_opts_config(Config) ->
 	KrnlDir = filename:join([LibDir, "kernel-" ++ KRNL_VSN]),
 	{ok, _} = file:read_file_info(StdlDir),
 	{ok, _} = file:read_file_info(KrnlDir),
-	SSL_VSN = vsn(ssl),
-	VSN_CRYPTO = vsn(crypto),
-	VSN_PKEY = vsn(public_key),
+	SSL_VSN = get_app_vsn(ssl),
+	VSN_CRYPTO = get_app_vsn(crypto),
+	VSN_ASN1 = get_app_vsn(asn1),
+	VSN_PKEY = get_app_vsn(public_key),
 
 	SslDir = filename:join([LibDir, "ssl-" ++ SSL_VSN]),
 	{ok, _} = file:read_file_info(SslDir),
@@ -847,6 +1096,7 @@ add_ssl_opts_config(Config) ->
 		  " [{kernel, \"~s\"},~n"
 		  "  {stdlib, \"~s\"},~n"
 		  "  {crypto, \"~s\"},~n"
+		  "  {asn1, \"~s\"},~n"
 		  "  {public_key, \"~s\"},~n"
 		  "  {ssl, \"~s\"}]}.~n",
 		  [case catch erlang:system_info(otp_release) of
@@ -857,13 +1107,23 @@ add_ssl_opts_config(Config) ->
 		   KRNL_VSN,
 		   STDL_VSN,
 		   VSN_CRYPTO,
+                   VSN_ASN1,
 		   VSN_PKEY,
 		   SSL_VSN]),
 	ok = file:close(RelFile),
-	ok = systools:make_script(Script, []),
+        ?CT_LOG("Bootscript: ~p", [Script]),
+	case systools:make_script(Script, []) of
+            ok ->
+                ok;
+            NotOk ->
+                ?CT_PAL("Bootscript problem: ~p", [NotOk]),
+                erlang:error(NotOk)
+        end,
 	[{app_opts, "-boot " ++ Script} | Config]
     catch
-	_:_ ->
+	Class : Reason : Stacktrace ->
+            ?CT_LOG("Exception while generating bootscript:~n~p",
+                   [{Class, Reason, Stacktrace}]),
 	    [{app_opts, "-pa \"" ++ filename:dirname(code:which(ssl))++"\""}
 	     | add_comment_config(
 		 "Bootscript wasn't used since the test wasn't run on an "
@@ -885,19 +1145,12 @@ success(Config) ->
 	_ -> ok
     end.
 
-vsn(App) ->
-    application:start(App),
-    try
-	{value,
-	 {ssl,
-	  _,
-	  VSN}} = lists:keysearch(App,
-				  1,
-				  application:which_applications()),
-	VSN
-     after
-	 application:stop(ssl)
-     end.
+get_app_vsn(erts) ->
+    erlang:system_info(version);
+get_app_vsn(App) ->
+    application:load(App),
+    {ok, AppKeys} = application:get_all_key(App),
+    proplists:get_value(vsn, AppKeys).
 
 verify_fail_always(_Certificate, _Event, _State) ->
     %% Create an ETS table, to record the fact that the verify function ran.
@@ -929,6 +1182,18 @@ verify_pass_always(_Certificate, _Event, State) ->
     receive go_ahead -> ok end,
     {valid, State}.
 
+verify_tls(NH1, NH2) ->
+    %% Verify that distribution protocol between nodes is TLS
+    Node1 = NH1#node_handle.nodename,
+    Node2 = NH2#node_handle.nodename,
+    {ok,NodeInfo2} = apply_on_ssl_node(NH1, net_kernel, node_info, [Node2]),
+    {ok,NodeInfo1} = apply_on_ssl_node(NH2, net_kernel, node_info, [Node1]),
+    {address,#net_address{protocol = tls}} =
+        lists:keyfind(address, 1, NodeInfo1),
+    {address,#net_address{protocol = tls}} =
+        lists:keyfind(address, 1, NodeInfo2),
+    ok.
+
 localhost_ip(InetVer) ->
     {ok, Addr} = inet:getaddr(net_adm:localhost(), InetVer),
     Addr.
@@ -952,13 +1217,21 @@ inet_ver() ->
 
 rsa_root_key(N) ->
     %% As rsa keygen is not guaranteed to be fast
-    [{key, ssl_test_lib:hardcode_rsa_key(N)}].
+    {key, ssl_test_lib:hardcode_rsa_key(N)}.
 
 rsa_peer_key(N) ->
     %% As rsa keygen is not guaranteed to be fast
-    [{key, ssl_test_lib:hardcode_rsa_key(N)}].
+    {key, ssl_test_lib:hardcode_rsa_key(N)}.
 
-rsa_intermediate(N) -> 
-    [{key, ssl_test_lib:hardcode_rsa_key(N)}].
+rsa_intermediate_conf(N) ->
+    [{key, ssl_test_lib:hardcode_rsa_key(N)}, {digest, sha256}].
 
 
+maybe_quote_tuple_list(String) ->
+    case os:cmd("echo [{a,1}]") of
+        "[{a,1}]"++_ ->
+            String;
+        _ ->
+            %% Some shells need quoting of [{}]
+            "'"++String++"'"
+    end.

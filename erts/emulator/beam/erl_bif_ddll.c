@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2006-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2024. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@
 #include "erl_bif_unique.h"
 #include "dtrace-wrapper.h"
 #include "lttng-wrapper.h"
+#include "erl_iolist.h"
 
 /*
  * Local types
@@ -1724,7 +1725,7 @@ static int errdesc_to_code(Eterm errdesc, int *code /* out */)
 	for (i = 0; errcode_tab[i].atm != NULL; ++i) {
 	    int len = sys_strlen(errcode_tab[i].atm);
 	    if (len == ap->len && 
-		!sys_strncmp(errcode_tab[i].atm,(char *) ap->name,len)) {
+		!sys_strncmp(errcode_tab[i].atm,(char *) erts_atom_get_name(ap),len)) {
 		*code = errcode_tab[i].code;
 		return 0;
 	    }
@@ -1798,7 +1799,7 @@ static char *pick_list_or_atom(Eterm name_term)
 	    goto error;
 	}
 	name = erts_alloc(ERTS_ALC_T_DDLL_TMP_BUF, ap->len + 1);
-	sys_memcpy(name,ap->name,ap->len);
+	sys_memcpy(name,erts_atom_get_name(ap),ap->len);
 	name[ap->len] = '\0';
     } else {
 	if (erts_iolist_size(name_term, &name_len)) {

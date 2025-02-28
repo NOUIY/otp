@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2017-2019. All Rights Reserved.
+%% Copyright Ericsson AB 2017-2022. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -38,7 +38,8 @@
 %%
 
 -export([listen/1, accept/1, accept_connection/5,
-	 setup/5, close/1, select/1, is_node_name/1]).
+	 setup/5, close/1, select/1, is_node_name/1,
+         address/0]).
 
 %% Optional
 -export([setopts/2, getopts/2]).
@@ -71,6 +72,12 @@ select(Node) ->
             end;
 	_ -> false
     end.
+
+%% ------------------------------------------------------------
+%% Get the address family that this distribution uses
+%% ------------------------------------------------------------
+address() ->
+    get_tcp_address().
 
 %% ------------------------------------------------------------
 %% Create the listen socket, i.e. the port that this erlang
@@ -183,7 +190,7 @@ flush_controller(Pid, Socket) ->
 accept_connection(AcceptPid, DistCtrl, MyNode, Allowed, SetupTime) ->
     spawn_opt(?MODULE, do_accept,
 	      [self(), AcceptPid, DistCtrl, MyNode, Allowed, SetupTime],
-	      [link, {priority, max}]).
+	      dist_util:net_ticker_spawn_options()).
 
 do_accept(Kernel, AcceptPid, DistCtrl, MyNode, Allowed, SetupTime) ->
     ?trace("~p~n",[{?MODULE, do_accept, self(), MyNode}]),
@@ -230,7 +237,7 @@ nodelay() ->
 setup(Node, Type, MyNode, LongOrShortNames,SetupTime) ->
     spawn_opt(?MODULE, do_setup, 
 	      [self(), Node, Type, MyNode, LongOrShortNames, SetupTime],
-	      [link, {priority, max}]).
+	      dist_util:net_ticker_spawn_options()).
 
 do_setup(Kernel, Node, Type, MyNode, LongOrShortNames, SetupTime) ->
     ?trace("~p~n",[{?MODULE, do_setup, self(), Node}]),
@@ -344,9 +351,12 @@ split_node([], _, Ack)        -> [lists:reverse(Ack)].
 %% ------------------------------------------------------------
 get_tcp_address(Socket) ->
     {ok, Address} = inet:sockname(Socket),
+    NetAddr = get_tcp_address(),
+    NetAddr#net_address{address = Address}.
+
+get_tcp_address() ->
     {ok, Host} = inet:gethostname(),
     #net_address {
-		  address = Address,
 		  host = Host,
 		  protocol = tcp,
 		  family = inet

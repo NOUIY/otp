@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2003-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2023. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,17 +21,18 @@
 
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
 	 init_per_group/2,end_per_group/2,basic/1,lean_throw/1,
-	 try_of/1,try_after/1,%after_bind/1,
+	 try_of/1,try_after/1,
 	 catch_oops/1,after_oops/1,eclectic/1,rethrow/1,
 	 nested_of/1,nested_catch/1,nested_after/1,
 	 nested_horrid/1,last_call_optimization/1,bool/1,
-	 plain_catch_coverage/1,andalso_orelse/1,get_in_try/1,
+	 andalso_orelse/1,get_in_try/1,
 	 hockey/1,handle_info/1,catch_in_catch/1,grab_bag/1,
          stacktrace/1,nested_stacktrace/1,raise/1,
          no_return_in_try_block/1,
          expression_export/1,
          throw_opt_crash/1,
-         coverage/1]).
+         coverage/1,
+         throw_opt_funs/1]).
 
 -include_lib("common_test/include/ct.hrl").
 
@@ -45,12 +46,13 @@ groups() ->
       [basic,lean_throw,try_of,try_after,catch_oops,
        after_oops,eclectic,rethrow,nested_of,nested_catch,
        nested_after,nested_horrid,last_call_optimization,
-       bool,plain_catch_coverage,andalso_orelse,get_in_try,
+       bool,andalso_orelse,get_in_try,
        hockey,handle_info,catch_in_catch,grab_bag,
        stacktrace,nested_stacktrace,raise,
        no_return_in_try_block,expression_export,
        throw_opt_crash,
-       coverage]}].
+       coverage,
+       throw_opt_funs]}].
 
 
 init_per_suite(Config) ->
@@ -326,35 +328,6 @@ try_after_try(X, Y) ->
                         catch
                             _ -> ok
                         end).
-
--ifdef(begone).
-
-after_bind(Conf) when is_list(Conf) ->
-    V = [make_ref(),self()|value],
-    {value,{value,V}} =
-	after_bind_1({value,V}, V, {value,V}),
-    ok.
-
-after_bind_1(X, V, Y) ->
-    try
-        Try =
-            try foo(X) of
-                V -> value
-            catch
-                C1:V -> {caught,C1}
-            after
-                After = foo(Y)
-	    end,
-        {Try,After} 
-    of
-        V -> {value,V}
-    catch
-        C:D -> {caught,{C,D}}
-    end.
-
--endif.
-
-
 
 catch_oops(Conf) when is_list(Conf) ->
     V = {v,[a,l|u],{e},self()},
@@ -1004,14 +977,6 @@ do_bool(A0, B) ->
 	    error
     end.
 
-plain_catch_coverage(Config) when is_list(Config) ->
-    %% Cover some code in beam_block:alloc_may_pass/1.
-    {a,[42]} = do_plain_catch_list(42).
-
-do_plain_catch_list(X) ->
-    B = [X],
-    catch id({a,B}).
-
 andalso_orelse(Config) when is_list(Config) ->
     {2,{a,42}} = andalso_orelse_1(true, {a,42}),
     {b,{b}} = andalso_orelse_1(false, {b}),
@@ -1161,6 +1126,8 @@ grab_bag(_Config) ->
 
     {'EXIT',_} = (catch grab_bag_3()),
 
+    true = grab_bag_4(),
+
     ok.
 
 grab_bag_1(V) ->
@@ -1214,6 +1181,16 @@ grab_bag_3() ->
             %% The default clause here (which re-throws the exception)
             %% would not return two values as expected.
     end =:= (V0 = 42).
+
+grab_bag_4() ->
+    try
+        erlang:yield()
+    after
+        %% beam_jump would do an unsafe sharing of blocks, resulting
+        %% in an ambiguous_catch_try_state diagnostic from beam_validator.
+        catch <<>> = size(catch ([_ | _] = ok))
+    end.
+
 
 stacktrace(_Config) ->
     V = [make_ref()|self()],
@@ -1578,10 +1555,13 @@ throw_opt_crash_1(true, {_, _}=Term) ->
 throw_opt_crash_1(false, _Term) ->
     ok.
 
-coverage(_Config) ->
+coverage(Config) ->
     {'EXIT',{{badfun,true},[_|_]}} = (catch coverage_1()),
     ok = coverage_ssa_throw(),
     error = coverage_pre_codegen(),
+    {a,[42]} = do_plain_catch_list(42),
+    cover_raise(Config),
+
     ok.
 
 %% Cover some code in beam_trim.
@@ -1682,5 +1662,52 @@ coverage_pre_codegen() ->
             error
     end.
 
+%% Cover some code in beam_block:alloc_may_pass/1.
+do_plain_catch_list(X) ->
+    B = [X],
+    catch id({a,B}).
+
+cover_raise(Config) ->
+    UncertainClass = uncertain_class(Config),
+    badarg = erlang:raise(UncertainClass, reason, []),
+    BadClass = bad_class(Config),
+    badarg = erlang:raise(BadClass, reason, []),
+    ok.
+
+uncertain_class(Config) ->
+    case Config of
+        [never_ever] ->  error;
+        _ -> undefined_class
+    end.
+
+bad_class(Config) ->
+    case Config of
+        [never_ever] -> bad_class;
+        _ -> also_bad
+    end.
+
+%% GH-7356: Funs weren't considered when checking whether an exception could
+%% escape the module, erroneously triggering the optimization in some cases.
+throw_opt_funs(_Config) ->
+    try throw_opt_funs_1(id(a)) of
+        _ -> unreachable
+    catch
+        _:Val -> a = id(Val)                    %Assertion.
+    end,
+
+    F = id(fun throw_opt_funs_1/1),
+
+    try F(a) of
+        _ -> unreachable
+    catch
+        _:_:Stack -> true = length(Stack) > 0   %Assertion.
+    end,
+
+    ok.
+
+throw_opt_funs_1(a) ->
+    throw(a);
+throw_opt_funs_1(I) ->
+    I.
 
 id(I) -> I.

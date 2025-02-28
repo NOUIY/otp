@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2018-2021. All Rights Reserved.
+ * Copyright Ericsson AB 2018-2024. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -93,7 +93,8 @@
  *                      Key:            Reference
  *                      Name:           Name (atom) if by name
  *
- *              Valid keys are only ordinary internal references.
+ *              Valid keys are only ordinary internal references or internal
+ *              pid-reference.
  *
  *              Origin part of the monitor is stored in the monitor tree of
  *              origin process and target part of the monitor is stored in
@@ -112,7 +113,8 @@
  *                      Key:            Reference
  *                      Name:           Name (atom) if by name
  *
- *              Valid keys are only ordinary internal references.
+ *              Valid keys are only ordinary internal references or internal
+ *              pid-reference.
  *
  *              Origin part of the monitor is stored in the monitor tree of
  *              origin process/port and target part of the monitor is stored
@@ -130,7 +132,8 @@
  *              Shared:
  *                      Key:            Reference
  *
- *              Valid keys are only ordinary internal references.
+ *              Valid keys are only ordinary internal references or internal
+ *              pid-reference.
  *
  *              Origin part of the monitor is stored in the monitor tree of
  *              origin process and target part of the monitor is stored in
@@ -153,7 +156,8 @@
  *                      Name:           Name (atom) if by name
  *                      Dist:           Pointer to dist structure
  *
- *              Valid keys are only ordinary internal references.
+ *              Valid keys are only ordinary internal references or internal
+ *              pid-reference.
  *
  *              Origin part of the monitor is stored in the monitor tree of
  *              origin process and target part of the monitor is stored in
@@ -181,6 +185,30 @@
  *              monitor is stored in the monitor tree of the local target
  *              process.
  *
+ *
+ *              --- ERTS_MON_TYPE_DIST_PORT -----------------------------------
+ *
+ *              A local process (origin) monitors a port (target) on an old
+ *              incarnation of the local node. Note that it is currently only
+ *              for this since operations against remote ports is not
+ *              supported.
+ *
+ *              Origin:
+ *                      Other Item:     Monitored port identifier
+ *              Target:
+ *                      Other Item:     Local process identifier
+ *              Shared:
+ *                      Key:            Reference
+ *                      Dist:           NULL
+ *
+ *              Valid keys are only ordinary internal references or internal
+ *              pid-reference.
+ *
+ *              Origin part of the monitor is stored in the monitor tree of
+ *              origin process and target part is currently only used when
+ *              passing monitor down signal (monitors against old incarnations
+ *              will always immediately trigger monitor down noproc since the
+ *              process wont be alive).
  *
  *              --- ERTS_MON_TYPE_RESOURCE ------------------------------------
  *
@@ -414,59 +442,85 @@
 #  define ERTS_ML_ASSERT(E) ((void) 1)
 #endif
 
-#define ERTS_ML_STATE_ALIAS_BITS        2
-#define ERTS_ML_STATE_ALIAS_SHIFT       11
-#define ERTS_ML_STATE_ALIAS_MASK        \
-    ((((Uint16) 1 << ERTS_ML_STATE_ALIAS_BITS) - 1) \
-     << ERTS_ML_STATE_ALIAS_SHIFT)
+#define ERTS_MON_TYPE_MAX               ((Uint32) 9)
 
-#define ERTS_ML_STATE_ALIAS_NONE        (((Uint16) 0) << ERTS_ML_STATE_ALIAS_SHIFT)
-#define ERTS_ML_STATE_ALIAS_UNALIAS     (((Uint16) 1) << ERTS_ML_STATE_ALIAS_SHIFT)
-#define ERTS_ML_STATE_ALIAS_DEMONITOR   (((Uint16) 2) << ERTS_ML_STATE_ALIAS_SHIFT)
-#define ERTS_ML_STATE_ALIAS_ONCE        (((Uint16) 3) << ERTS_ML_STATE_ALIAS_SHIFT)
-
-#define ERTS_MON_TYPE_MAX               ((Uint16) 8)
-
-#define ERTS_MON_TYPE_PROC              ((Uint16) 0)
-#define ERTS_MON_TYPE_PORT              ((Uint16) 1)
-#define ERTS_MON_TYPE_TIME_OFFSET       ((Uint16) 2)
-#define ERTS_MON_TYPE_DIST_PROC         ((Uint16) 3)
-#define ERTS_MON_TYPE_RESOURCE          ((Uint16) 4)
-#define ERTS_MON_TYPE_NODE              ((Uint16) 5)
-#define ERTS_MON_TYPE_NODES             ((Uint16) 6)
-#define ERTS_MON_TYPE_SUSPEND           ((Uint16) 7)
+#define ERTS_MON_TYPE_PROC              ((Uint32) 0)
+#define ERTS_MON_TYPE_PORT              ((Uint32) 1)
+#define ERTS_MON_TYPE_TIME_OFFSET       ((Uint32) 2)
+#define ERTS_MON_TYPE_DIST_PROC         ((Uint32) 3)
+#define ERTS_MON_TYPE_DIST_PORT         ((Uint32) 4)
+#define ERTS_MON_TYPE_RESOURCE          ((Uint32) 5)
+#define ERTS_MON_TYPE_NODE              ((Uint32) 6)
+#define ERTS_MON_TYPE_NODES             ((Uint32) 7)
+#define ERTS_MON_TYPE_SUSPEND           ((Uint32) 8)
 #define ERTS_MON_TYPE_ALIAS             ERTS_MON_TYPE_MAX
 
-#define ERTS_MON_LNK_TYPE_MAX           (ERTS_MON_TYPE_MAX + ((Uint16) 3))
+#define ERTS_MON_LNK_TYPE_MAX           (ERTS_MON_TYPE_MAX + ((Uint32) 4))
 #define ERTS_LNK_TYPE_MAX               ERTS_MON_LNK_TYPE_MAX
 
-#define ERTS_LNK_TYPE_PROC              (ERTS_MON_TYPE_MAX + ((Uint16) 1))
-#define ERTS_LNK_TYPE_PORT              (ERTS_MON_TYPE_MAX + ((Uint16) 2))
-#define ERTS_LNK_TYPE_DIST_PROC         ERTS_LNK_TYPE_MAX
+#define ERTS_LNK_TYPE_PROC              (ERTS_MON_TYPE_MAX + ((Uint32) 1))
+#define ERTS_LNK_TYPE_PORT              (ERTS_MON_TYPE_MAX + ((Uint32) 2))
+#define ERTS_LNK_TYPE_DIST_PROC         (ERTS_MON_TYPE_MAX + ((Uint32) 3))
+#define ERTS_LNK_TYPE_DIST_PORT         ERTS_LNK_TYPE_MAX
 
-#define ERTS_ML_FLG_TARGET              (((Uint16) 1) << 0)
-#define ERTS_ML_FLG_IN_TABLE            (((Uint16) 1) << 1)
-#define ERTS_ML_FLG_IN_SUBTABLE         (((Uint16) 1) << 2)
-#define ERTS_ML_FLG_NAME                (((Uint16) 1) << 3)
-#define ERTS_ML_FLG_EXTENDED            (((Uint16) 1) << 4)
-#define ERTS_ML_FLG_SPAWN_PENDING       (((Uint16) 1) << 5)
-#define ERTS_ML_FLG_SPAWN_MONITOR       (((Uint16) 1) << 6)
-#define ERTS_ML_FLG_SPAWN_LINK          (((Uint16) 1) << 7)
-#define ERTS_ML_FLG_SPAWN_ABANDONED     (((Uint16) 1) << 8)
-#define ERTS_ML_FLG_SPAWN_NO_SMSG       (((Uint16) 1) << 9)
-#define ERTS_ML_FLG_SPAWN_NO_EMSG       (((Uint16) 1) << 10)
-#define ERTS_ML_FLG_ALIAS_BIT1          (((Uint16) 1) << 11)
-#define ERTS_ML_FLG_ALIAS_BIT2          (((Uint16) 1) << 12)
-#define ERTS_ML_FLG_TAG                 (((Uint16) 1) << 13)
+#define ERTS_ML_TYPE_BITS               5
+#define ERTS_ML_TYPE_SHIFT              0
+#define ERTS_ML_TYPE_MASK \
+    (((((Uint32) 1) << ERTS_ML_TYPE_BITS) - 1) << ERTS_ML_TYPE_SHIFT)
 
-#define ERTS_ML_FLG_DBG_VISITED         (((Uint16) 1) << 15)
+#define ERTS_ML_GET_TYPE(MLN) \
+    (((MLN)->flags & ERTS_ML_TYPE_MASK) >> ERTS_ML_TYPE_SHIFT)
+#define ERTS_ML_SET_TYPE(MLN, T)                                        \
+    do {                                                                \
+        ASSERT(ERTS_ML_TYPE_MASK >= ((T) << ERTS_ML_TYPE_SHIFT));       \
+        (MLN)->flags &= ~ERTS_ML_TYPE_MASK;                             \
+        (MLN)->flags |= ((T) << ERTS_ML_TYPE_SHIFT);                    \
+    } while (0)
+
+#define ERTS_ML_STATE_ALIAS_BITS        2
+#define ERTS_ML_STATE_ALIAS_SHIFT       ERTS_ML_TYPE_BITS
+#define ERTS_ML_STATE_ALIAS_MASK \
+    ((((Uint32) 1 << ERTS_ML_STATE_ALIAS_BITS) - 1) \
+     << ERTS_ML_STATE_ALIAS_SHIFT)
+
+#define ERTS_ML_STATE_ALIAS_NONE \
+    (((Uint32) 0) << ERTS_ML_STATE_ALIAS_SHIFT)
+#define ERTS_ML_STATE_ALIAS_UNALIAS \
+    (((Uint32) 1) << ERTS_ML_STATE_ALIAS_SHIFT)
+#define ERTS_ML_STATE_ALIAS_DEMONITOR \
+    (((Uint32) 2) << ERTS_ML_STATE_ALIAS_SHIFT)
+#define ERTS_ML_STATE_ALIAS_ONCE \
+    (((Uint32) 3) << ERTS_ML_STATE_ALIAS_SHIFT)
+
+#define ERTS_ML_F_BASE \
+    (ERTS_ML_TYPE_BITS + ERTS_ML_STATE_ALIAS_BITS)
+
+#define ERTS_ML_FLG_TARGET              (((Uint32) 1) << (ERTS_ML_F_BASE + 0))
+#define ERTS_ML_FLG_IN_TABLE            (((Uint32) 1) << (ERTS_ML_F_BASE + 1))
+#define ERTS_ML_FLG_IN_SUBTABLE         (((Uint32) 1) << (ERTS_ML_F_BASE + 2))
+#define ERTS_ML_FLG_NAME                (((Uint32) 1) << (ERTS_ML_F_BASE + 3))
+#define ERTS_ML_FLG_EXTENDED            (((Uint32) 1) << (ERTS_ML_F_BASE + 4))
+#define ERTS_ML_FLG_SPAWN_PENDING       (((Uint32) 1) << (ERTS_ML_F_BASE + 5))
+#define ERTS_ML_FLG_SPAWN_MONITOR       (((Uint32) 1) << (ERTS_ML_F_BASE + 6))
+#define ERTS_ML_FLG_SPAWN_LINK          (((Uint32) 1) << (ERTS_ML_F_BASE + 7))
+#define ERTS_ML_FLG_SPAWN_ABANDONED     (((Uint32) 1) << (ERTS_ML_F_BASE + 8))
+#define ERTS_ML_FLG_SPAWN_NO_SMSG       (((Uint32) 1) << (ERTS_ML_F_BASE + 9))
+#define ERTS_ML_FLG_SPAWN_NO_EMSG       (((Uint32) 1) << (ERTS_ML_F_BASE + 10))
+#define ERTS_ML_FLG_TAG                 (((Uint32) 1) << (ERTS_ML_F_BASE + 11))
+#define ERTS_ML_FLG_PRIO_ML             (((Uint32) 1) << (ERTS_ML_F_BASE + 12))
+#define ERTS_ML_FLG_PRIO_ALIAS          (((Uint32) 1) << (ERTS_ML_F_BASE + 13))
+#define ERTS_ML_FLG_SPAWN_LINK_PRIO     (((Uint32) 1) << (ERTS_ML_F_BASE + 14))
+
+/* ERTS_ML_FLG_DBG_VISITED in most significant bit... */
+#define ERTS_ML_FLG_DBG_VISITED         (((Uint32) 1) << (ERTS_ML_F_BASE + 24))
 
 #define ERTS_ML_FLGS_SPAWN              (ERTS_ML_FLG_SPAWN_PENDING      \
                                          | ERTS_ML_FLG_SPAWN_MONITOR    \
                                          | ERTS_ML_FLG_SPAWN_LINK       \
                                          | ERTS_ML_FLG_SPAWN_ABANDONED  \
                                          | ERTS_ML_FLG_SPAWN_NO_SMSG    \
-                                         | ERTS_ML_FLG_SPAWN_NO_EMSG)
+                                         | ERTS_ML_FLG_SPAWN_NO_EMSG    \
+                                         | ERTS_ML_FLG_SPAWN_LINK_PRIO)
 
 /* Flags that should be the same on both monitor/link halves */
 #define ERTS_ML_FLGS_SAME \
@@ -488,7 +542,7 @@ typedef struct {
 
 struct ErtsMonLnkNode__ {
     union {
-        ErtsSignalCommon signal;
+        ErtsNonMsgSignal signal;
         ErtsMonLnkTreeNode tree;
         ErtsMonLnkListNode list;
     } node;
@@ -498,8 +552,7 @@ struct ErtsMonLnkNode__ {
     } other;
     Uint16 offset; /* offset from monitor/link data to this structure (node) */
     Uint16 key_offset; /* offset from this structure (node) to key */
-    Uint16 flags;
-    Uint16 type;
+    Uint32 flags;
 };
 
 typedef struct ErtsMonLnkDist__ {
@@ -1166,12 +1219,13 @@ int erts_monitor_list_foreach_delete_yielding(ErtsMonitor **list,
  * Can create all types of monitors
  *
  * When the function is called it is assumed that:
- * - 'ref' is an internal ordinary reference if type is ERTS_MON_TYPE_PROC,
- *   ERTS_MON_TYPE_PORT, ERTS_MON_TYPE_TIME_OFFSET, or ERTS_MON_TYPE_RESOURCE
+ * - 'ref' is an ordinary internal reference or internal pid-reference if type
+ *   is ERTS_MON_TYPE_PROC, ERTS_MON_TYPE_PORT, ERTS_MON_TYPE_DIST_PORT,
+ *   ERTS_MON_TYPE_TIME_OFFSET, or ERTS_MON_TYPE_RESOURCE
  * - 'ref' is NIL if type is ERTS_MON_TYPE_NODE, ERTS_MON_TYPE_NODES, or
  *   ERTS_MON_TYPE_SUSPEND
- * - 'ref' is and ordinary internal reference or an external reference if
- *   type is ERTS_MON_TYPE_DIST_PROC
+ * - 'ref' is and ordinary internal reference, internal pid-reference or an
+ *   external reference if type is ERTS_MON_TYPE_DIST_PROC
  * - 'name' is an atom or NIL if type is ERTS_MON_TYPE_PROC,
  *   ERTS_MON_TYPE_PORT, or ERTS_MON_TYPE_DIST_PROC
  * - 'name is NIL if type is ERTS_MON_TYPE_TIME_OFFSET, ERTS_MON_TYPE_RESOURCE,
@@ -1180,8 +1234,9 @@ int erts_monitor_list_foreach_delete_yielding(ErtsMonitor **list,
  *
  * @param[in]     type          ERTS_MON_TYPE_PROC, ERTS_MON_TYPE_PORT,
  *                              ERTS_MON_TYPE_TIME_OFFSET, ERTS_MON_TYPE_DIST_PROC,
- *                              ERTS_MON_TYPE_RESOURCE, ERTS_MON_TYPE_NODE,
- *                              ERTS_MON_TYPE_NODES, or ERTS_MON_TYPE_SUSPEND
+ *                              ERTS_MON_TYPE_DIST_PORT, ERTS_MON_TYPE_RESOURCE,
+ *                              ERTS_MON_TYPE_NODE, ERTS_MON_TYPE_NODES, or
+ *                              ERTS_MON_TYPE_SUSPEND
  *
  * @param[in]     ref           A reference or NIL depending on type
  *
@@ -1423,18 +1478,19 @@ erts_monitor_to_data(ErtsMonitor *mon)
 #ifdef ERTS_ML_DEBUG
     ERTS_ML_ASSERT(!(mdp->origin.flags & ERTS_ML_FLG_TARGET));
     ERTS_ML_ASSERT(erts_monitor_origin_offset == (size_t) mdp->origin.offset);
-    ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_ALIAS
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_ALIAS
                    || !!(mdp->u.target.flags & ERTS_ML_FLG_TARGET));
-    ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_ALIAS
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_ALIAS
                    || erts_monitor_target_offset == (size_t) mdp->u.target.offset);
-    if (mon->type == ERTS_MON_TYPE_NODE || mon->type == ERTS_MON_TYPE_NODES
-        || mon->type == ERTS_MON_TYPE_SUSPEND) {
+    if (ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_NODE
+        || ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_NODES
+        || ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_SUSPEND) {
         ERTS_ML_ASSERT(erts_monitor_node_key_offset == (size_t) mdp->origin.key_offset);
         ERTS_ML_ASSERT(erts_monitor_node_key_offset == (size_t) mdp->u.target.key_offset);
     }
     else {
         ERTS_ML_ASSERT(erts_monitor_origin_key_offset == (size_t) mdp->origin.key_offset);
-        ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_ALIAS
+        ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_ALIAS
                        || erts_monitor_target_key_offset == (size_t) mdp->u.target.key_offset);
     }
 #endif
@@ -1450,7 +1506,7 @@ erts_monitor_release(ErtsMonitor *mon)
 
     if (erts_atomic32_dec_read_mb(&mdp->refc) == 0) {
         ERTS_ML_ASSERT(!(mdp->origin.flags & ERTS_ML_FLG_IN_TABLE));
-        ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_ALIAS
+        ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_ALIAS
                        || !(mdp->u.target.flags & ERTS_ML_FLG_IN_TABLE));
 
         erts_monitor_destroy__(mdp);
@@ -1479,8 +1535,8 @@ erts_monitor_dist_insert(ErtsMonitor *mon, ErtsMonLnkDist *dist)
     int insert;
 
     ERTS_ML_ASSERT(mon->flags & ERTS_ML_FLG_EXTENDED);
-    ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_DIST_PROC
-                   || mon->type == ERTS_MON_TYPE_NODE);
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_DIST_PROC
+                   || ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_NODE);
 
     mdep = (ErtsMonitorDataExtended *) erts_monitor_to_data(mon);
 
@@ -1515,8 +1571,8 @@ erts_monitor_dist_delete(ErtsMonitor *mon)
     int delete_;
 
     ERTS_ML_ASSERT(mon->flags & ERTS_ML_FLG_EXTENDED);
-    ERTS_ML_ASSERT(mon->type == ERTS_MON_TYPE_DIST_PROC
-                   || mon->type == ERTS_MON_TYPE_NODE);
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_DIST_PROC
+                   || ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_NODE);
 
     mdep = (ErtsMonitorDataExtended *) erts_monitor_to_data(mon);
     dist = mdep->dist;
@@ -1555,7 +1611,7 @@ ERTS_GLB_INLINE ErtsMonitorSuspend *erts_monitor_suspend(ErtsMonitor *mon);
 
 ERTS_GLB_INLINE ErtsMonitorSuspend *erts_monitor_suspend(ErtsMonitor *mon)
 {
-    ERTS_ML_ASSERT(!mon || mon->type == ERTS_MON_TYPE_SUSPEND);
+    ERTS_ML_ASSERT(!mon || ERTS_ML_GET_TYPE(mon) == ERTS_MON_TYPE_SUSPEND);
     return (ErtsMonitorSuspend *) mon;
 }
 
@@ -2404,8 +2460,8 @@ erts_link_list_last(ErtsLink *list)
 ERTS_GLB_INLINE void
 erts_link_internal_release(ErtsLink *lnk)
 {
-    ERTS_ML_ASSERT(lnk->type == ERTS_LNK_TYPE_PROC
-                   || lnk->type == ERTS_LNK_TYPE_PORT);
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_PROC
+                   || ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_PORT);
     ERTS_ML_ASSERT(!(lnk->flags & ERTS_ML_FLG_EXTENDED));
     erts_free(ERTS_ALC_T_LINK, lnk);
 }
@@ -2468,7 +2524,7 @@ erts_link_dist_insert(ErtsLink *lnk, ErtsMonLnkDist *dist)
     int insert;
 
     ERTS_ML_ASSERT(lnk->flags & ERTS_ML_FLG_EXTENDED);
-    ERTS_ML_ASSERT(lnk->type == ERTS_LNK_TYPE_DIST_PROC);
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_DIST_PROC);
 
     elnk = erts_link_to_elink(lnk);
 
@@ -2497,12 +2553,15 @@ erts_link_dist_delete(ErtsLink *lnk)
     int delete_;
 
     ERTS_ML_ASSERT(lnk->flags & ERTS_ML_FLG_EXTENDED);
-    ERTS_ML_ASSERT(lnk->type == ERTS_LNK_TYPE_DIST_PROC);
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_DIST_PROC
+                   || ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_DIST_PORT);
 
     elnk = erts_link_to_elink(lnk);
     dist = elnk->dist;
     if (!dist)
         return -1;
+
+    ERTS_ML_ASSERT(ERTS_ML_GET_TYPE(lnk) == ERTS_LNK_TYPE_DIST_PROC);
 
     erts_mtx_lock(&dist->mtx);
 

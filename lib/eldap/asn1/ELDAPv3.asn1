@@ -2,6 +2,7 @@
 -- Copyright (C) The Internet Society (2006).  This version of
 -- this ASN.1 module is part of RFC 4511; see the RFC itself
 -- for full legal notices.
+-- SPDX-License-Identifier: MIT
 ELDAPv3 DEFINITIONS
 IMPLICIT TAGS
 EXTENSIBILITY IMPLIED ::=
@@ -285,6 +286,17 @@ PasswdModifyRequestValue ::= SEQUENCE {
 
 PasswdModifyResponseValue ::= SEQUENCE {
      genPasswd        [0]     OCTET STRING OPTIONAL }
+
+-- LDAP Control Extension for Simple Paged Results Manipulation
+-- https://www.rfc-editor.org/rfc/rfc2696.txt
+-- controlType 1.2.840.113556.1.4.319
+
+RealSearchControlValue ::= SEQUENCE {
+    size            INTEGER (0..maxInt),
+                            -- requested page size from client
+                            -- result set size estimate from server
+    cookie          OCTET STRING
+}
 
 END
 

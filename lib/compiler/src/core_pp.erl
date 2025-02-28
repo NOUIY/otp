@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1999-2021. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2024. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 %% Purpose : Core Erlang (naive) prettyprinter
 
 -module(core_pp).
+-moduledoc false.
 
 -export([format/1,format_all/1]).
 
@@ -61,7 +62,11 @@ maybe_anno(Node, Fun, #ctxt{clean=true}=Ctxt) ->
 	    maybe_anno(Node, Fun, Ctxt, As0);
   	Line ->
 	    As = strip_line(As0),
-	    if Line > Ctxt#ctxt.line ->
+            NeedsAnno = needs_line_anno(Node),
+	    if
+                NeedsAnno ->
+                    maybe_anno(Node, Fun, Ctxt, As0);
+                Line > Ctxt#ctxt.line ->
 		    [io_lib:format("%% Line ~w",[Line]),
 		     nl_indent(Ctxt),
 		     maybe_anno(Node, Fun, Ctxt#ctxt{line = Line}, As)
@@ -69,6 +74,14 @@ maybe_anno(Node, Fun, #ctxt{clean=true}=Ctxt) ->
 		true ->
 		    maybe_anno(Node, Fun, Ctxt, As)
 	    end
+    end.
+
+needs_line_anno(Node) ->
+    case (cerl:is_c_primop(Node) andalso
+          cerl:concrete(cerl:primop_name(Node))) of
+        debug_line -> true;
+        executable_line -> true;
+        _ -> false
     end.
 
 maybe_anno(Node, Fun, Ctxt, []) ->
@@ -134,11 +147,10 @@ format_1(#c_literal{anno=A,val=Bitstring}, Ctxt) when is_bitstring(Bitstring) ->
     Segs = segs_from_bitstring(Bitstring),
     format_1(#c_binary{anno=A,segments=Segs}, Ctxt);
 format_1(#c_literal{anno=A,val=M},Ctxt) when is_map(M) ->
-    Pairs = maps:to_list(M),
     Op = #c_literal{val=assoc},
     Cpairs = [#c_map_pair{op=Op,
 			  key=#c_literal{val=K},
-			  val=#c_literal{val=V}} || {K,V} <- Pairs],
+			  val=#c_literal{val=V}} || K := V <- M],
     format_1(#c_map{anno=A,arg=#c_literal{val=#{}},es=Cpairs},Ctxt);
 format_1(#c_literal{val=F},_Ctxt) when is_function(F) ->
     {module,M} = erlang:fun_info(F, module),
@@ -359,7 +371,9 @@ format_1(#c_module{name=N,exports=Es,attrs=As,defs=Ds}, Ctxt) ->
      format_funcs(Ds, Ctxt),
      nl_indent(Ctxt)
      | "end"
-    ].
+    ];
+format_1(#c_opaque{val=V}, Ctxt) ->
+    ["%% Opaque: ", format_1(#c_literal{val=V}, Ctxt)].
 
 format_funcs(Fs, Ctxt) ->
     format_vseq(Fs,

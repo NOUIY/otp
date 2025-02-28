@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2002-2021. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2024. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,7 +18,14 @@
 %% %CopyrightEnd%
 %%
 -module(test_server_node).
--compile(r22).
+-moduledoc false.
+
+%% Prior to OTP 26, maybe_expr used to require runtime support. As it's now
+%% enabled by default, all modules are tagged with the feature even when they
+%% don't use it. Therefore, we explicitly disable it until OTP 25 is out of
+%% support.
+-feature(maybe_expr, disable).
+-compile(r25).
 
 %% Test Controller interface
 -export([is_release_available/1, find_release/1]).
@@ -102,7 +109,8 @@ start_node_peer(SlaveName, OptList, From, TI) ->
     CrashArgs = lists:concat([" -env ERL_CRASH_DUMP \"",CrashFile,"\" "]),
     FailOnError = start_node_get_option_value(fail_on_error, OptList, true),
     Prog0 = start_node_get_option_value(erl, OptList, default),
-    Prog = quote_progname(pick_erl_program(Prog0)),
+    {ClearAFlags, Prog1} = pick_erl_program(Prog0),
+    Prog = quote_progname(Prog1),
     Args = 
 	case string:find(SuppliedArgs,"-setcookie") of
 	    nomatch ->
@@ -116,9 +124,11 @@ start_node_peer(SlaveName, OptList, From, TI) ->
 			NodeStarted,
 			CrashArgs,
 			" ", Args]),
-    Opts = case start_node_get_option_value(env, OptList, []) of
-	       [] -> [];
-	       Env -> [{env, Env}]
+    Opts = case {ClearAFlags, start_node_get_option_value(env, OptList, [])} of
+	       {false, []} -> [];
+	       {false, Env} -> [{env, Env}];
+               {true, []} -> [{env, [{"ERL_AFLAGS", false}]}];
+	       {true, Env} -> [{env, [{"ERL_AFLAGS", false} | Env]}]
 	   end,
     %% peer is always started on localhost
     %%
@@ -171,11 +181,12 @@ start_node_slave(SlaveName, OptList, From, _TI) ->
     Args = lists:concat([" ", SuppliedArgs, CrashArgs]),
 
     Prog0 = start_node_get_option_value(erl, OptList, default),
-    Prog = pick_erl_program(Prog0),
+    {ClearAFlags, Prog} = pick_erl_program(Prog0),
     Ret = 
 	case start_which_node(OptList) of
 	    {error,Reason} -> {{error,Reason},undefined,undefined};
-	    Host0 -> do_start_node_slave(Host0,SlaveName,Args,Prog,Cleanup)
+	    Host0 -> do_start_node_slave(Host0,SlaveName,Args,Prog,Cleanup,
+                                         ClearAFlags)
 	end,
     gen_server:reply(From,Ret).
 
@@ -183,24 +194,50 @@ start_node_slave(SlaveName, OptList, From, _TI) ->
 %%  but deprecated function.
 -compile([{nowarn_deprecated_function,[{slave,start,5}]}]).
 
-do_start_node_slave(Host0, SlaveName, Args, Prog, Cleanup) ->
+do_start_node_slave(Host0, SlaveName, Args, Prog, Cleanup, ClearAFlags) ->
     Host =
 	case Host0 of
 	    local -> test_server_sup:hoststr();
 	    _ -> cast_to_list(Host0)
 	end,
     Cmd = Prog ++ " " ++ Args,
-    case slave:start(Host, SlaveName, Args, no_link, Prog) of
-	{ok,Nodename} ->
-	    case Cleanup of
-		true -> ets:insert(slave_tab,#slave_info{name=Nodename});
-		false -> ok
-	    end,
-	    {{ok,Nodename}, Host, Cmd, [], []};
-	Ret ->
-	    {Ret, Host, Cmd}
+    SavedAFlags = save_clear_aflags(ClearAFlags),
+    Res = case slave:start(Host, SlaveName, Args, no_link, Prog) of
+              {ok,Nodename} ->
+                  case Cleanup of
+                      true -> ets:insert(slave_tab,#slave_info{name=Nodename});
+                      false -> ok
+                  end,
+                  {{ok,Nodename}, Host, Cmd, [], []};
+              Ret ->
+                  {Ret, Host, Cmd}
+          end,
+    restore_aflags(SavedAFlags),
+    Res.
+
+%%
+%% This saving/clearing/restoring is not free from races, but since
+%% there are no slave:start() that has an option for setting environment
+%% this is the best we can do without improving the slave module. Since
+%% the slave module is about to be replaced by the new peer module, we
+%% do not bother...
+%%
+save_clear_aflags(false) ->
+    false;
+save_clear_aflags(true) ->
+    case os:getenv("ERL_AFLAGS") of
+        false ->
+            false;
+        ErlAFlags ->
+            os:unsetenv("ERL_AFLAGS"),
+            ErlAFlags
     end.
 
+restore_aflags(false) ->
+    ok;
+restore_aflags(ErlAFlags) ->
+    true = os:putenv("ERL_AFLAGS", ErlAFlags),
+    ok.
 
 wait_for_node_started(LSock,Timeout,Client,Cleanup,TI,CtrlPid) ->
     case gen_tcp:accept(LSock,Timeout) of
@@ -382,27 +419,25 @@ cast_to_list(X) -> lists:flatten(io_lib:format("~tw", [X])).
 %%%  {release, Rel} where Rel = String | latest | previous
 %%%  this
 %%%
+%%% First element of returned tuple answers the question
+%%% "Do we need to clear ERL_AFLAGS?":
+%%% When starting a node with a previous release, options in
+%%% ERL_AFLAGS could prevent the node from starting. For example,
+%%% if ERL_AFLAGS is set to "-emu_type lcnt", the node will only
+%%% start if the previous release happens to also have a lock
+%%% counter emulator installed (unlikely).
 pick_erl_program(default) ->
-    ct:get_progname();
+    {false, ct:get_progname()};
 pick_erl_program(L) ->
     P = random_element(L),
     case P of
 	{prog, S} ->
-	    S;
+	    {false, S};
 	{release, S} ->
-            clear_erl_aflags(),
-	    find_release(S);
+	    {true, find_release(S)};
 	this ->
-	    ct:get_progname()
+	    {false, ct:get_progname()}
     end.
-
-clear_erl_aflags() ->
-    %% When starting a node with a previous release, options in
-    %% ERL_AFLAGS could prevent the node from starting. For example,
-    %% if ERL_AFLAGS is set to "-emu_type lcnt", the node will only
-    %% start if the previous release happens to also have a lock
-    %% counter emulator installed (unlikely).
-    os:unsetenv("ERL_AFLAGS").
 
 %% This is an attempt to distinguish between spaces in the program
 %% path and spaces that separate arguments. The program is quoted to
@@ -432,14 +467,38 @@ do_quote_progname([Prog,Arg|Args]) ->
 random_element(L) ->
     lists:nth(rand:uniform(length(L)), L).
 
+otp_release_path(RelPath) ->
+    filename:join(otp_release_root(), RelPath).
+
+otp_release_root() ->
+    case get(test_server_release_root) of
+        undefined ->
+            Root = os:getenv("TEST_SERVER_RELEASE_ROOT",
+                             "/usr/local/otp/releases"),
+            put(test_server_release_root, Root),
+            Root;
+        Cached ->
+            Cached
+    end.
+
 find_release(latest) ->
-    "/usr/local/otp/releases/latest/bin/erl";
+    otp_release_path("latest/bin/erl");
 find_release(previous) ->
     "kaka";
 find_release(Rel) ->
     case find_release(os:type(), Rel) of
         none ->
-            find_release_path(Rel);
+            case find_release_path(Rel) of
+                none ->
+                    case string:take(Rel,"_",true) of
+                        {Rel,[]} ->
+                            none;
+                        {RelNum,_} ->
+                            find_release_path(RelNum)
+                    end;
+                Release ->
+                    Release
+            end;
         Else ->
             Else
     end.
@@ -452,19 +511,19 @@ find_release_path([Path|T], Rel) ->
         false ->
             find_release_path(T, Rel);
         ErlExec ->
-            Pattern = filename:join([Path,"..","releases","*","OTP_VERSION"]),
-            case filelib:wildcard(Pattern) of
-                [VersionFile] ->
-                    {ok, VsnBin} = file:read_file(VersionFile),
-                    [MajorVsn|_] = string:lexemes(VsnBin, "."),
-                    case unicode:characters_to_list(MajorVsn) of
-                        Rel ->
-                            ErlExec;
-                        _Else ->
-                            find_release_path(T, Rel)
+            QuotedExec = "\""++ErlExec++"\"",
+            Release = os:cmd(QuotedExec ++ " -noinput -eval 'io:format(\"~ts\", [erlang:system_info(otp_release)])' -s init stop"),
+            case Release =:= Rel of
+                true ->
+                    %% Check is the release is a source tree release,
+                    %% if so we should not use it.
+                    case os:cmd(QuotedExec ++ " -noinput -eval 'io:format(\"~p\",[filelib:is_file(filename:join([code:root_dir(),\"OTP_VERSION\"]))]).' -s init stop") of
+                        "true" ->
+                            find_release_path(T, Rel);
+                        "false" ->
+                            ErlExec
                     end;
-                _Else ->
-                    find_release_path(T, Rel)
+                false -> find_release_path(T, Rel)
             end
     end;
 find_release_path([], _) ->
@@ -473,7 +532,7 @@ find_release_path([], _) ->
 find_release({unix,sunos}, Rel) ->
     case os:cmd("uname -p") of
 	"sparc" ++ _ ->
-	    "/usr/local/otp/releases/otp_beam_solaris8_" ++ Rel ++ "/bin/erl";
+            otp_release_path("otp_beam_solaris8_" ++ Rel ++ "/bin/erl");
 	_ ->
 	    none
     end;
@@ -504,7 +563,7 @@ find_rel_linux(Rel) ->
     end.
 
 find_rel_suse(Rel, SuseRel) ->
-    Root = "/usr/local/otp/releases/sles",
+    Root = otp_release_path("sles"),
     case SuseRel of
 	"11" ->
 	    %% Try both SuSE 11, SuSE 10 and SuSe 9 in that order.
@@ -579,14 +638,20 @@ suse_release(Fd) ->
 
 find_rel_ubuntu(_Rel, UbuntuRel) when is_integer(UbuntuRel), UbuntuRel < 16 ->
     [];
-find_rel_ubuntu(Rel, UbuntuRel) when is_integer(UbuntuRel) ->
-    Root = "/usr/local/otp/releases/ubuntu",
+find_rel_ubuntu(_Rel, UbuntuRel) when is_integer(UbuntuRel), UbuntuRel < 20 ->
+    find_rel_ubuntu(_Rel, 16, UbuntuRel);
+find_rel_ubuntu(_Rel, UbuntuRel) when is_integer(UbuntuRel) ->
+    find_rel_ubuntu(_Rel, 20, UbuntuRel).
+
+find_rel_ubuntu(Rel, MinUbuntuRel, MaxUbuntuRel) when
+      is_integer(MinUbuntuRel), is_integer(MaxUbuntuRel) ->
+    Root = otp_release_path("ubuntu"),
     lists:foldl(fun (ChkUbuntuRel, Acc) ->
                         find_rel_ubuntu_aux1(Rel, Root++integer_to_list(ChkUbuntuRel))
                             ++ Acc
                 end,
                 [],
-                lists:seq(16, UbuntuRel)).
+                lists:seq(MinUbuntuRel, MaxUbuntuRel)).
 
 find_rel_ubuntu_aux1(Rel, RootWc) ->
     case erlang:system_info(wordsize) of

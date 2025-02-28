@@ -241,7 +241,7 @@ Uncheck option:
 
     $ cat > test.c
     $ int main() { printf("Hello, world!\n"); return 0; }
-    <CTRL+D>
+    <Ctrl+D>
     $ armv8-rpi3-linux-gnueabihf-gcc -o test test.c
 
 
@@ -257,9 +257,9 @@ Uncheck option:
 
   (20)
 
-    $ wget http://zlib.net/zlib-1.2.11.tar.gz
-    $ tar xf zlib-1.2.11.tar.gz
-    $ pushd zlib-1.2.11
+    $ wget http://zlib.net/zlib-1.2.13.tar.gz
+    $ tar xf zlib-1.2.13.tar.gz
+    $ pushd zlib-1.2.13
     $ CHOST=armv8-rpi3-linux-gnueabihf ./configure --prefix=/Volumes/xtools-build-env/local
     $ make
     $ make install
